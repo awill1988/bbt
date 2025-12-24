@@ -1,4 +1,4 @@
-use crate::error::{BookmarksError, Result};
+use crate::error::{BbtError, Result};
 use regex::Regex;
 use once_cell::sync::Lazy;
 
@@ -14,7 +14,7 @@ pub fn extract_create_table(sql_text: &str) -> Result<String> {
     let text = sql_text.trim();
 
     if text.is_empty() {
-        return Err(BookmarksError::DdlExtraction(
+        return Err(BbtError::DdlExtraction(
             "model returned empty output".to_string()
         ));
     }
@@ -28,7 +28,7 @@ pub fn extract_create_table(sql_text: &str) -> Result<String> {
 
     // find CREATE TABLE statement
     let mat = CREATE_TABLE_REGEX.find(text).ok_or_else(|| {
-        BookmarksError::DdlExtraction(
+        BbtError::DdlExtraction(
             "model output did not contain create table".to_string()
         )
     })?;

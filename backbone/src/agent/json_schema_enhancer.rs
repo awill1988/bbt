@@ -1,4 +1,4 @@
-use crate::error::{BookmarksError, Result};
+use crate::error::{BbtError, Result};
 use crate::llm::model::{LlamaModel, Message};
 use crate::schema::hints::FieldHints;
 use serde_json::Value;
@@ -55,11 +55,11 @@ pub async fn enhance_json_schema(
         model_clone.generate(messages)
     })
     .await
-    .map_err(|e| BookmarksError::Model(format!("task join error: {}", e)))??;
+    .map_err(|e| BbtError::Model(format!("task join error: {}", e)))??;
 
     // parse and validate enhanced schema
     let enhanced: Value = serde_json::from_str(&output).map_err(|e| {
-        BookmarksError::Schema(format!(
+        BbtError::Schema(format!(
             "llm returned invalid json for schema enhancement: {}",
             e
         ))

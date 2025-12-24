@@ -1,5 +1,5 @@
 [package]
-name = "common"
+name = "backbone"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
+dirs = { workspace = true }
 
 # LLM
 llm = { workspace = true }

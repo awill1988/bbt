@@ -59,7 +59,7 @@ pub fn init_tracing(service_name: &str) -> Result<OtelGuard> {
         .with_tonic()
         .with_endpoint(&endpoint_url)
         .build()
-        .map_err(|e| crate::error::BookmarksError::Tracing(format!("exporter build failed: {}", e)))?;
+        .map_err(|e| crate::error::BbtError::Tracing(format!("exporter build failed: {}", e)))?;
 
     let resource = Resource::builder_empty()
         .with_attribute(KeyValue::new("service.name", service_name.to_string()))

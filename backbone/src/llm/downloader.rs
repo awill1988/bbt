@@ -1,4 +1,4 @@
-use crate::error::{BookmarksError, Result};
+use crate::error::{BbtError, Result};
 use std::env;
 use std::path::PathBuf;
 
@@ -44,12 +44,12 @@ pub fn ensure_gguf_model(
 
     // use hf-hub to download the model
     let api = hf_hub::api::sync::Api::new()
-        .map_err(|e| BookmarksError::ModelDownload(format!("failed to create hf-hub api: {}", e)))?;
+        .map_err(|e| BbtError::ModelDownload(format!("failed to create hf-hub api: {}", e)))?;
 
     let repo = api.model(repo_id.clone());
 
     let model_path = repo.get(&filename).map_err(|e| {
-        BookmarksError::ModelDownload(format!(
+        BbtError::ModelDownload(format!(
             "failed to download {}/{}: {}",
             repo_id, filename, e
         ))

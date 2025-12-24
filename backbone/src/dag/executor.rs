@@ -1,6 +1,6 @@
 use crate::dag::graph::Dag;
 use crate::dag::task::{Task, TaskContext, TaskResult};
-use crate::error::{BookmarksError, Result};
+use crate::error::{BbtError, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -53,7 +53,7 @@ impl DagExecutor {
                 let task = Arc::clone(tasks
                     .get(task_id)
                     .ok_or_else(|| {
-                        BookmarksError::Schema(format!("task not found: {}", task_id))
+                        BbtError::Schema(format!("task not found: {}", task_id))
                     })?);
 
                 let task_ctx = ctx.clone();
@@ -79,7 +79,7 @@ impl DagExecutor {
                         "task completed successfully"
                     );
 
-                    Ok::<_, BookmarksError>(TaskResult {
+                    Ok::<_, BbtError>(TaskResult {
                         task_id: task_id_owned,
                         output,
                         duration_ms,
@@ -93,7 +93,7 @@ impl DagExecutor {
             // collect all results from this level
             while let Some(result) = join_set.join_next().await {
                 let task_result = result.map_err(|e| {
-                    BookmarksError::Schema(format!("task join error: {}", e))
+                    BbtError::Schema(format!("task join error: {}", e))
                 })??;
 
                 results.insert(task_result.task_id.clone(), task_result);

@@ -1,14 +1,14 @@
 [package]
-name = "bookmarks"
+name = "bbt"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "bookmarks"
+name = "bbt"
 path = "src/main.rs"
 
 [dependencies]
-common = { path = "../common" }
+backbone = { path = "../backbone" }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["common", "bookmarks"]
+members = ["backbone", "bbt"]
 
 [workspace.dependencies]
 # CLI
@@ -48,3 +48,42 @@ mimalloc = "0.1"
 
 # Path/filesystem
 once_cell = "1.19"
+walkdir = "2.4"
+
+# PDF processing
+pdfium-render = "0.8"
+lopdf = "0.32"
+
+# OCR
+tesseract = "0.15"
+
+# ONNX (embeddings + reranking)
+ort = { version = "2.0", features = ["download-binaries"] }
+
+# Vector DB
+qdrant-client = "1.11"
+
+# Text processing
+unicode-segmentation = "1.11"
+unicode-normalization = "0.1"
+tokenizers = "0.19"
+
+# Hashing
+sha2 = "0.10"
+
+# HTTP server
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Caching
+lru = "0.12"
+
+# UUID generation
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# Datetime
+chrono = { version = "0.4", features = ["serde"] }
+
+# System directories
+dirs = "5.0"

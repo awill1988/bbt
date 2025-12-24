@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "bookmarks")]
-#[command(about = "bookmark schema generation tool", long_about = None)]
+#[command(name = "bbt")]
+#[command(about = "big brain time - document ingestion and RAG", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -105,17 +105,17 @@ async fn generate_schema(
     cache_dir: Option<PathBuf>,
     max_attempts: usize,
 ) -> Result<()> {
-    use common::dag::{Dag, DagExecutor, Task, TaskContext, TaskOutput};
-    use common::dag::task::{JsonSchemaGenerationTask, SqlGenerationTask};
-    use common::llm::{ensure_gguf_model, LlamaModel, ModelConfig};
-    use common::schema::{derive_field_hints, infer_json_schema};
-    use common::tracing::init_tracing;
+    use backbone::dag::{Dag, DagExecutor, Task, TaskContext, TaskOutput};
+    use backbone::dag::task::{JsonSchemaGenerationTask, SqlGenerationTask};
+    use backbone::llm::{ensure_gguf_model, LlamaModel, ModelConfig};
+    use backbone::schema::{derive_field_hints, infer_json_schema};
+    use backbone::tracing::init_tracing;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tracing::Instrument;
 
     // initialize tracing
-    let _guard = init_tracing("bookmarks")?;
+    let _guard = init_tracing("bbt")?;
 
     tracing::info!("loading bookmarks from {}", input.display());
 

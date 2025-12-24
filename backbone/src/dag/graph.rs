@@ -1,4 +1,4 @@
-use crate::error::{BookmarksError, Result};
+use crate::error::{BbtError, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// directed acyclic graph for task orchestration
@@ -26,7 +26,7 @@ impl Dag {
         for (task_id, deps) in &self.dependencies {
             for dep in deps {
                 if !self.dependencies.contains_key(dep) {
-                    return Err(BookmarksError::Schema(format!(
+                    return Err(BbtError::Schema(format!(
                         "task '{}' depends on non-existent task '{}'",
                         task_id, dep
                     )));
@@ -41,7 +41,7 @@ impl Dag {
         for task_id in self.dependencies.keys() {
             if !visited.contains(task_id) {
                 if self.has_cycle(task_id, &mut visited, &mut rec_stack)? {
-                    return Err(BookmarksError::Schema(
+                    return Err(BbtError::Schema(
                         "dag contains a cycle".to_string()
                     ));
                 }
@@ -134,7 +134,7 @@ impl Dag {
 
         // verify all tasks were processed
         if processed.len() != self.dependencies.len() {
-            return Err(BookmarksError::Schema(
+            return Err(BbtError::Schema(
                 "dag contains unreachable tasks or cycles".to_string(),
             ));
         }

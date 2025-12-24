@@ -1,6 +1,6 @@
 use crate::agent::parser::extract_create_table;
 use crate::agent::prompt::{build_schema_task_prompt, SCHEMA_SYSTEM_PROMPT};
-use crate::error::{BookmarksError, Result};
+use crate::error::{BbtError, Result};
 use crate::llm::model::{LlamaModel, Message};
 use crate::schema::hints::FieldHints;
 use crate::schema::inference::Schema;
@@ -26,7 +26,7 @@ pub async fn generate_schema_sql_with_retry(
     max_attempts: usize,
 ) -> Result<String> {
     let prompt = build_schema_task_prompt(schema, hints);
-    let mut last_error: Option<BookmarksError> = None;
+    let mut last_error: Option<BbtError> = None;
     let mut current_prompt = prompt.clone();
 
     for attempt in 1..=max_attempts {
@@ -41,7 +41,7 @@ pub async fn generate_schema_sql_with_retry(
             generate_schema_sql(&model_clone, &current_prompt_clone)
         })
         .await
-        .map_err(|e| BookmarksError::Model(format!("task join error: {}", e)))?;
+        .map_err(|e| BbtError::Model(format!("task join error: {}", e)))?;
 
         match result {
             Ok(ddl) => {
@@ -63,27 +63,27 @@ pub async fn generate_schema_sql_with_retry(
     }
 
     Err(last_error.unwrap_or_else(|| {
-        BookmarksError::Model(format!(
+        BbtError::Model(format!(
             "schema synthesis failed after {} attempts",
             max_attempts
         ))
     }))
 }
 
-impl Clone for BookmarksError {
+impl Clone for BbtError {
     fn clone(&self) -> Self {
         match self {
-            BookmarksError::Io(e) => BookmarksError::Io(std::io::Error::new(e.kind(), e.to_string())),
-            BookmarksError::Json(e) => BookmarksError::Json(serde_json::Error::io(std::io::Error::new(
+            BbtError::Io(e) => BbtError::Io(std::io::Error::new(e.kind(), e.to_string())),
+            BbtError::Json(e) => BbtError::Json(serde_json::Error::io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 e.to_string(),
             ))),
-            BookmarksError::Model(s) => BookmarksError::Model(s.clone()),
-            BookmarksError::Schema(s) => BookmarksError::Schema(s.clone()),
-            BookmarksError::DdlExtraction(s) => BookmarksError::DdlExtraction(s.clone()),
-            BookmarksError::ModelDownload(s) => BookmarksError::ModelDownload(s.clone()),
-            BookmarksError::GpuDetection(s) => BookmarksError::GpuDetection(s.clone()),
-            BookmarksError::Tracing(s) => BookmarksError::Tracing(s.clone()),
+            BbtError::Model(s) => BbtError::Model(s.clone()),
+            BbtError::Schema(s) => BbtError::Schema(s.clone()),
+            BbtError::DdlExtraction(s) => BbtError::DdlExtraction(s.clone()),
+            BbtError::ModelDownload(s) => BbtError::ModelDownload(s.clone()),
+            BbtError::GpuDetection(s) => BbtError::GpuDetection(s.clone()),
+            BbtError::Tracing(s) => BbtError::Tracing(s.clone()),
         }
     }
 }

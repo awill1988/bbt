@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum BookmarksError {
+pub enum BbtError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -27,4 +27,4 @@ pub enum BookmarksError {
     Tracing(String),
 }
 
-pub type Result<T> = std::result::Result<T, BookmarksError>;
+pub type Result<T> = std::result::Result<T, BbtError>;

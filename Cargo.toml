@@ -87,3 +87,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # System directories
 dirs = "5.0"
+
+# Testing
+tempfile = "3.23"

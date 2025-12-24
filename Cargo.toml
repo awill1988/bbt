@@ -58,7 +58,7 @@ lopdf = "0.32"
 tesseract = "0.15"
 
 # ONNX (embeddings + reranking)
-ort = { version = "2.0", features = ["download-binaries"] }
+ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
 
 # Vector DB
 qdrant-client = "1.11"

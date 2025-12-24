@@ -7,5 +7,6 @@ pub mod dag;
 pub mod config;
 pub mod document;
 pub mod storage;
+pub mod embedding;
 
 pub use error::{BbtError, Result};

@@ -244,11 +244,19 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
                     "sh", "bash", "zsh", "fish",
                     // terraform/hcl
                     "tf", "tfvars", "hcl",
+                    // ios development
+                    "swift", "m", "mm", "xib", "storyboard", "plist",
+                    // android development
+                    "kt", "kts", "java", "xml", "gradle", "pro",
                     // template files
                     "j2", "jinja", "jinja2", "hbs", "handlebars", "mustache",
                     "tmpl", "template", "erb", "ejs", "tpl",
+                    // diagram/graph formats
+                    "mmd", "mermaid", "dot", "gv", "puml", "plantuml", "pu", "d2",
+                    // documentation formats
+                    "org", "tex", "latex", "adoc", "asciidoc", "rst",
                     // common config/doc files
-                    "toml", "yaml", "yml", "json", "md",
+                    "toml", "yaml", "yml", "json", "md", "txt",
                 ];
                 extensions.extend(code_exts.iter().map(|s| s.to_string()));
             }

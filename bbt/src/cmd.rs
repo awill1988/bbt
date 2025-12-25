@@ -262,6 +262,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     use backbone::document::loader::DocumentLoader;
     use backbone::document::text::chunking::chunk_text;
     use backbone::embedding::{ensure_onnx_model, EmbeddingModelInfo, ExecutionProvider, OnnxEmbedder};
+    use backbone::retrieval::bm25::{load_index, save_index};
     use backbone::storage::StateStore;
     use backbone::tracing::init_tracing;
     use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -551,6 +552,11 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
     let embedder = OnnxEmbedder::new(&model_path, model_info, ExecutionProvider::detect())?;
 
+    // load or create bm25 index
+    tracing::info!("loading bm25 index from {:?}", config.bm25_index_path);
+    let mut bm25_index = load_index(&config.bm25_index_path)?;
+    tracing::info!("bm25 index loaded with {} documents", bm25_index.num_docs());
+
     // use rest client instead of grpc
     let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
         Qdrant::from_url(&config.qdrant_url)
@@ -808,19 +814,26 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             continue;
         }
 
-        let points = chunks
-            .into_iter()
-            .zip(embeddings.into_iter())
-            .map(|(chunk_text, embedding)| {
-                let mut payload: HashMap<String, Value> = HashMap::new();
-                payload.insert("text".to_string(), chunk_text.into());
-                payload.insert(
-                    "source".to_string(),
-                    file_path.to_string_lossy().to_string().into(),
-                );
-                PointStruct::new(Uuid::new_v4().to_string(), embedding, payload)
-            })
-            .collect::<Vec<_>>();
+        // create points and add to bm25 index
+        let mut points = Vec::new();
+        for (chunk_text, embedding) in chunks.into_iter().zip(embeddings.into_iter()) {
+            // generate unique id for chunk
+            let chunk_id = Uuid::new_v4().to_string();
+
+            // create qdrant point
+            let mut payload: HashMap<String, Value> = HashMap::new();
+            payload.insert("text".to_string(), chunk_text.clone().into());
+            payload.insert(
+                "source".to_string(),
+                file_path.to_string_lossy().to_string().into(),
+            );
+            points.push(PointStruct::new(chunk_id.clone(), embedding, payload));
+
+            // add to bm25 index
+            if let Err(e) = bm25_index.add_document(&chunk_id, &chunk_text) {
+                tracing::warn!("failed to add chunk {} to bm25 index: {}", chunk_id, e);
+            }
+        }
 
         // retry upsert with exponential backoff
         let mut retry_count = 0;
@@ -886,6 +899,12 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     files_bar.finish_with_message("done");
     bytes_bar.finish_with_message("done");
+
+    // save bm25 index
+    tracing::info!("saving bm25 index with {} documents", bm25_index.num_docs());
+    if let Err(e) = save_index(&bm25_index, &config.bm25_index_path) {
+        tracing::error!("failed to save bm25 index: {}", e);
+    }
 
     tracing::info!("sync completed");
     let _ = log_tx.send("__bbt_log_close__".to_string());
@@ -1227,6 +1246,8 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
     use backbone::embedding::{ensure_onnx_model, EmbeddingModelInfo, OnnxEmbedder};
     use backbone::embedding::ExecutionProvider as EmbeddingExecutionProvider;
     use backbone::reranking::{ensure_rerank_model, ExecutionProvider as RerankExecutionProvider, OnnxReranker, RerankModelInfo};
+    use backbone::retrieval::{Bm25Scorer, FusionStrategy, fuse_results};
+    use backbone::retrieval::bm25::load_index;
     use backbone::tracing::init_tracing;
     use qdrant_client::qdrant::SearchPointsBuilder;
     use qdrant_client::Qdrant;
@@ -1246,88 +1267,229 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
         anyhow::bail!("query is required");
     }
 
-    if config.retrieval_mode != RetrievalMode::Vector {
-        let retrieval_mode = format!("{:?}", config.retrieval_mode).to_lowercase();
-        tracing::warn!(
-            "retrieval mode {} not supported yet, falling back to vector",
-            retrieval_mode
-        );
-        config.retrieval_mode = RetrievalMode::Vector;
-    }
-
     if config.top_k == 0 {
         anyhow::bail!("top_k must be greater than 0");
     }
 
-    let model_info = EmbeddingModelInfo::default_model();
-    let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
-    let embedder = OnnxEmbedder::new(&model_path, model_info, EmbeddingExecutionProvider::detect())?;
-
-    let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
-        Qdrant::from_url(&config.qdrant_url)
-            .api_key(api_key.clone())
-            .timeout(std::time::Duration::from_secs(60))
-            .build()?
+    // load bm25 index if needed
+    let bm25_index = if config.retrieval_mode == RetrievalMode::Bm25
+        || config.retrieval_mode == RetrievalMode::Hybrid
+    {
+        tracing::info!("loading bm25 index from {:?}", config.bm25_index_path);
+        Some(load_index(&config.bm25_index_path)?)
     } else {
-        Qdrant::from_url(&config.qdrant_url)
-            .timeout(std::time::Duration::from_secs(60))
-            .build()?
+        None
     };
-
-    let embeddings = embedder.embed(&[query.to_string()])?;
-    let query_vector = embeddings
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("failed to embed query"))?;
-
-    let collection_name = "bbt".to_string();
-    let collection_exists = qdrant_client
-        .collection_exists(&collection_name)
-        .await
-        .unwrap_or(false);
-    if !collection_exists {
-        anyhow::bail!("collection '{}' not found, run sync first", collection_name);
-    }
 
     // calculate initial retrieval limit
     // if reranking is enabled, retrieve more candidates for better recall
     let rerank_multiplier = if config.enable_rerank { 3 } else { 1 };
     let initial_limit = config.top_k * rerank_multiplier;
 
-    let mut search_builder =
-        SearchPointsBuilder::new(collection_name.clone(), query_vector, initial_limit as u64)
-            .with_payload(true);
+    // perform retrieval based on mode
+    let candidates: Vec<QueryResultOutput> = match config.retrieval_mode {
+        RetrievalMode::Vector => {
+            tracing::info!("vector search with top_k={}", initial_limit);
 
-    if let Some(filter) = build_query_filter(&args) {
-        search_builder = search_builder.filter(filter);
-    }
+            let model_info = EmbeddingModelInfo::default_model();
+            let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
+            let embedder = OnnxEmbedder::new(&model_path, model_info, EmbeddingExecutionProvider::detect())?;
 
-    let response = qdrant_client.search_points(search_builder).await?;
+            let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
+                Qdrant::from_url(&config.qdrant_url)
+                    .api_key(api_key.clone())
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()?
+            } else {
+                Qdrant::from_url(&config.qdrant_url)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()?
+            };
 
-    // convert qdrant results to intermediate format
-    let mut candidates: Vec<QueryResultOutput> = Vec::new();
-    for point in response.result {
-        let payload = point.payload;
-        let text = payload
-            .get("text")
-            .and_then(|value| value_as_string(value))
-            .unwrap_or_default();
-        let source_raw = payload
-            .get("source")
-            .and_then(|value| value_as_string(value));
-        let citation_raw = format_citation(source_raw.as_deref());
-        let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
-        let source = display_source(source_raw.as_deref(), args.citation_mode);
-        let id = point_id_to_string(point.id);
+            let embeddings = embedder.embed(&[query.to_string()])?;
+            let query_vector = embeddings
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("failed to embed query"))?;
 
-        candidates.push(QueryResultOutput {
-            id,
-            score: point.score,
-            text,
-            citation,
-            source,
-        });
-    }
+            let collection_name = "bbt".to_string();
+            let collection_exists = qdrant_client
+                .collection_exists(&collection_name)
+                .await
+                .unwrap_or(false);
+            if !collection_exists {
+                anyhow::bail!("collection '{}' not found, run sync first", collection_name);
+            }
+
+            let mut search_builder =
+                SearchPointsBuilder::new(collection_name.clone(), query_vector, initial_limit as u64)
+                    .with_payload(true);
+
+            if let Some(filter) = build_query_filter(&args) {
+                search_builder = search_builder.filter(filter);
+            }
+
+            let response = qdrant_client.search_points(search_builder).await?;
+
+            // convert qdrant results to intermediate format
+            let mut results = Vec::new();
+            for point in response.result {
+                let payload = point.payload;
+                let text = payload
+                    .get("text")
+                    .and_then(|value| value_as_string(value))
+                    .unwrap_or_default();
+                let source_raw = payload
+                    .get("source")
+                    .and_then(|value| value_as_string(value));
+                let citation_raw = format_citation(source_raw.as_deref());
+                let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
+                let source = display_source(source_raw.as_deref(), args.citation_mode);
+                let id = point_id_to_string(point.id);
+
+                results.push(QueryResultOutput {
+                    id,
+                    score: point.score,
+                    text,
+                    citation,
+                    source,
+                });
+            }
+            results
+        }
+        RetrievalMode::Bm25 => {
+            tracing::info!("bm25 search with top_k={}", initial_limit);
+
+            let index = bm25_index.as_ref().unwrap();
+            let scorer = Bm25Scorer::with_params(config.bm25_k1, config.bm25_b);
+            let bm25_results = scorer.search(index, query, initial_limit);
+
+            tracing::info!("bm25 returned {} results", bm25_results.len());
+
+            // convert bm25 results to QueryResultOutput format
+            bm25_results
+                .into_iter()
+                .map(|result| {
+                    let source_raw = index
+                        .get_document(&result.doc_id)
+                        .and_then(|_doc| {
+                            // extract source from chunk_text metadata if available
+                            // for now, use doc_id as fallback
+                            Some(result.doc_id.clone())
+                        });
+                    let citation_raw = format_citation(source_raw.as_deref());
+                    let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
+                    let source = display_source(source_raw.as_deref(), args.citation_mode);
+
+                    QueryResultOutput {
+                        id: result.doc_id,
+                        score: result.score,
+                        text: result.text,
+                        citation,
+                        source,
+                    }
+                })
+                .collect()
+        }
+        RetrievalMode::Hybrid => {
+            tracing::info!("hybrid search (vector + bm25) with top_k={}", initial_limit);
+
+            // perform vector search
+            let model_info = EmbeddingModelInfo::default_model();
+            let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
+            let embedder = OnnxEmbedder::new(&model_path, model_info, EmbeddingExecutionProvider::detect())?;
+
+            let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
+                Qdrant::from_url(&config.qdrant_url)
+                    .api_key(api_key.clone())
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()?
+            } else {
+                Qdrant::from_url(&config.qdrant_url)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()?
+            };
+
+            let embeddings = embedder.embed(&[query.to_string()])?;
+            let query_vector = embeddings
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("failed to embed query"))?;
+
+            let collection_name = "bbt".to_string();
+            let collection_exists = qdrant_client
+                .collection_exists(&collection_name)
+                .await
+                .unwrap_or(false);
+            if !collection_exists {
+                anyhow::bail!("collection '{}' not found, run sync first", collection_name);
+            }
+
+            let mut search_builder =
+                SearchPointsBuilder::new(collection_name.clone(), query_vector, initial_limit as u64 * 2)
+                    .with_payload(true);
+
+            if let Some(filter) = build_query_filter(&args) {
+                search_builder = search_builder.filter(filter);
+            }
+
+            let response = qdrant_client.search_points(search_builder).await?;
+
+            // convert vector results
+            let vector_results: Vec<(String, f32, String)> = response
+                .result
+                .into_iter()
+                .map(|point| {
+                    let id = point_id_to_string(point.id);
+                    let text = point
+                        .payload
+                        .get("text")
+                        .and_then(|value| value_as_string(value))
+                        .unwrap_or_default();
+                    (id, point.score, text)
+                })
+                .collect();
+
+            // perform bm25 search
+            let index = bm25_index.as_ref().unwrap();
+            let scorer = Bm25Scorer::with_params(config.bm25_k1, config.bm25_b);
+            let bm25_results = scorer.search(index, query, initial_limit * 2);
+
+            tracing::info!(
+                "hybrid: vector returned {}, bm25 returned {}",
+                vector_results.len(),
+                bm25_results.len()
+            );
+
+            // fuse results using weighted sum
+            let strategy = FusionStrategy::WeightedSum {
+                vector_weight: config.vector_weight,
+                bm25_weight: config.bm25_weight,
+            };
+            let fused = fuse_results(&vector_results, &bm25_results, strategy, initial_limit)?;
+
+            tracing::info!("fusion returned {} results", fused.len());
+
+            // convert fused results to QueryResultOutput
+            fused
+                .into_iter()
+                .map(|result| {
+                    let source_raw = Some(result.doc_id.clone());
+                    let citation_raw = format_citation(source_raw.as_deref());
+                    let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
+                    let source = display_source(source_raw.as_deref(), args.citation_mode);
+
+                    QueryResultOutput {
+                        id: result.doc_id,
+                        score: result.score,
+                        text: result.text,
+                        citation,
+                        source,
+                    }
+                })
+                .collect()
+        }
+    };
 
     // apply reranking if enabled
     let results = if config.enable_rerank && !candidates.is_empty() {
@@ -1367,7 +1529,7 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
 
         // take top rerank_top_k results
         let final_limit = config.rerank_top_k.min(ranked.len());
-        let mut final_results: Vec<QueryResultOutput> = ranked
+        let final_results: Vec<QueryResultOutput> = ranked
             .into_iter()
             .take(final_limit)
             .map(|(mut result, rerank_score)| {

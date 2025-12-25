@@ -9,6 +9,21 @@ target/
 *.profraw
 *.profdata
 
+# c/c++ and clang artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.out
+*.exe
+*.dll
+compile_commands.json
+.clangd/
+CMakeFiles/
+cmake-build-*/
+build/
+*.dSYM/
+
 # ide
 .vscode/
 .idea/

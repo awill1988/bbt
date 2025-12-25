@@ -2,6 +2,20 @@
 target/
 *.so
 
+# c/c++ and clang build artifacts
+*.o
+*.a
+*.dylib
+*.out
+*.exe
+*.dll
+compile_commands.json
+.clangd/
+CMakeFiles/
+cmake-build-*/
+build/
+*.dSYM/
+
 # direnv and environment
 .direnv/
 .env

@@ -34,6 +34,7 @@ impl ExecutionProvider {
 
 /// onnx-based cross-encoder reranker
 pub struct OnnxReranker {
+    #[allow(dead_code)]
     session: Session,
     model_info: RerankModelInfo,
     provider: ExecutionProvider,

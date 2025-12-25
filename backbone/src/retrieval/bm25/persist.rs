@@ -1,34 +1,29 @@
 use crate::error::{BbtError, Result};
 use crate::retrieval::bm25::index::Bm25Index;
-use bincode::config;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::fs;
 use std::path::Path;
 
-/// save bm25 index to binary file using bincode
+/// save bm25 index to binary file using rkyv
 ///
 /// uses atomic write pattern: write to temp file, then rename
 pub fn save_index(index: &Bm25Index, path: &Path) -> Result<()> {
     // create temp file path
     let temp_path = path.with_extension("tmp");
 
-    // serialize to temp file
-    {
-        let file = File::create(&temp_path).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("failed to create temp file {:?}: {}", temp_path, e),
-            )
-        })?;
-        let mut writer = BufWriter::new(file);
+    // serialize to bytes
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(index)
+        .map_err(|e| BbtError::Schema(format!("failed to serialize bm25 index: {}", e)))?;
 
-        bincode::encode_into_std_write(index, &mut writer, config::standard()).map_err(|e| {
-            BbtError::Schema(format!("failed to serialize bm25 index: {}", e))
-        })?;
-    }
+    // write to temp file
+    fs::write(&temp_path, bytes).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("failed to write temp file {:?}: {}", temp_path, e),
+        )
+    })?;
 
     // atomic rename
-    std::fs::rename(&temp_path, path).map_err(|e| {
+    fs::rename(&temp_path, path).map_err(|e| {
         std::io::Error::new(
             e.kind(),
             format!("failed to rename {:?} to {:?}: {}", temp_path, path, e),
@@ -44,22 +39,21 @@ pub fn save_index(index: &Bm25Index, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// load bm25 index from binary file using bincode
+/// load bm25 index from binary file using rkyv (zero-copy deserialization)
 pub fn load_index(path: &Path) -> Result<Bm25Index> {
     if !path.exists() {
         tracing::debug!("bm25 index not found at {:?}, creating new index", path);
         return Ok(Bm25Index::new());
     }
 
-    let file = File::open(path).map_err(|e| {
-        std::io::Error::new(e.kind(), format!("failed to open index file {:?}: {}", path, e))
+    // read file into memory
+    let bytes = fs::read(path).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("failed to read index file {:?}: {}", path, e))
     })?;
-    let mut reader = BufReader::new(file);
 
-    let (index, _): (Bm25Index, usize) =
-        bincode::decode_from_std_read(&mut reader, config::standard()).map_err(|e| {
-            BbtError::Schema(format!("failed to deserialize bm25 index: {}", e))
-        })?;
+    // deserialize from bytes (zero-copy)
+    let index: Bm25Index = rkyv::from_bytes::<Bm25Index, rkyv::rancor::Error>(&bytes)
+        .map_err(|e| BbtError::Schema(format!("failed to deserialize bm25 index: {}", e)))?;
 
     tracing::info!(
         "loaded bm25 index with {} documents from {}",

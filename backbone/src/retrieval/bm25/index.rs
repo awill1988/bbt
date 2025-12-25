@@ -1,9 +1,9 @@
 use crate::error::Result;
-use bincode::{Decode, Encode};
+use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// document statistics for bm25 scoring
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize)]
 pub struct DocumentStats {
     pub doc_id: String,
     pub doc_length: usize,
@@ -11,7 +11,7 @@ pub struct DocumentStats {
 }
 
 /// in-memory bm25 inverted index
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize)]
 pub struct Bm25Index {
     /// inverted index: term -> [(doc_id, term_freq)]
     term_index: HashMap<String, Vec<(String, u32)>>,

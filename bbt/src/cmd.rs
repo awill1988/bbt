@@ -240,14 +240,22 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
                     "py", "pyi", "pyx",
                     // c/c++/clang
                     "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx", "inl",
+                    // assembly
+                    "asm", "s", "S",
                     // bash/shell
                     "sh", "bash", "zsh", "fish",
                     // terraform/hcl
                     "tf", "tfvars", "hcl",
                     // ios development
-                    "swift", "m", "mm", "xib", "storyboard", "plist",
+                    "swift", "m", "mm", "xib", "storyboard", "plist", "xcconfig",
                     // android development
                     "kt", "kts", "java", "xml", "gradle", "pro",
+                    // build systems
+                    "cmake", "mk", "ninja", "bzl", "bazel",
+                    // visual studio / msbuild
+                    "vcxproj", "sln", "props", "targets", "csproj", "vbproj", "fsproj",
+                    // linker and compiler
+                    "ld", "lds", "pc",
                     // template files
                     "j2", "jinja", "jinja2", "hbs", "handlebars", "mustache",
                     "tmpl", "template", "erb", "ejs", "tpl",
@@ -256,7 +264,7 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
                     // documentation formats
                     "org", "tex", "latex", "adoc", "asciidoc", "rst",
                     // common config/doc files
-                    "toml", "yaml", "yml", "json", "md", "txt",
+                    "toml", "yaml", "yml", "json", "md", "txt", "ini", "conf", "config",
                 ];
                 extensions.extend(code_exts.iter().map(|s| s.to_string()));
             }

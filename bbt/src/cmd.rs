@@ -264,7 +264,7 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
                     // documentation formats
                     "org", "tex", "latex", "adoc", "asciidoc", "rst",
                     // common config/doc files
-                    "toml", "yaml", "yml", "json", "md", "txt", "ini", "conf", "config",
+                    "toml", "yaml", "yml", "json", "jsonc", "md", "txt", "ini", "conf", "config",
                 ];
                 extensions.extend(code_exts.iter().map(|s| s.to_string()));
             }

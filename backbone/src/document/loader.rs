@@ -29,7 +29,7 @@ impl DocumentFormat {
                 "pdf" => Some(Self::Pdf),
                 "txt" => Some(Self::Text),
                 "md" | "markdown" => Some(Self::Markdown),
-                "json" => Some(Self::Json),
+                "json" | "jsonc" => Some(Self::Json),
                 // source code files - treat as text
                 "rs" | "py" | "pyi" | "pyx" |
                 "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" |
@@ -283,9 +283,10 @@ impl DocumentLoader {
         // For JSON, we read it as text and could optionally validate/format it
         let content = fs::read_to_string(path)?;
 
-        // Optionally validate JSON
-        let _: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| BbtError::Schema(format!("invalid json: {}", e)))?;
+        // Validate JSON using json5 parser (supports comments and trailing commas)
+        // This allows JSONC files (like VS Code configs) to be parsed
+        let _: serde_json::Value = json5::from_str(&content)
+            .map_err(|e| BbtError::Schema(format!("invalid json/jsonc: {}", e)))?;
 
         Ok(content)
     }

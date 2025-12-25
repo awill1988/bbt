@@ -12,7 +12,7 @@ pub fn default_config() -> BbtConfig {
         data_dir: PathBuf::from("./data"),
         model_cache_dir: PathBuf::from("./.cache/models"),
         vector_store_path: PathBuf::from("./data/vector_store"),
-        bm25_index_path: PathBuf::from("./data/bm25_index.jsonl"),
+        bm25_index_path: PathBuf::from("./data/bm25_index.bin"),
         state_store_path: PathBuf::from("./data/state.db"),
 
         // Document processing

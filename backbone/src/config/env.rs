@@ -1,4 +1,4 @@
-use super::{defaults, BbtConfig, RetrievalMode, VectorStoreType};
+use super::{defaults, BbtConfig};
 use crate::config::feature_flags::FeatureFlags;
 use crate::error::{BbtError, Result};
 use std::env;
@@ -62,7 +62,11 @@ pub fn from_env() -> Result<BbtConfig> {
             "BBT_VECTOR_STORE_TYPE",
             defaults.vector_store_type,
         )?,
-        qdrant_url: get_env_or("BBT_QDRANT_URL", defaults.qdrant_url),
+        qdrant_url: get_env_or_fallback(
+            "BBT_QDRANT_URL",
+            "BBT_VECTOR_STORE_URL",
+            defaults.qdrant_url,
+        ),
         qdrant_api_key: env::var("BBT_QDRANT_API_KEY").ok(),
         chromadb_url: get_env_or("BBT_CHROMADB_URL", defaults.chromadb_url),
         chromadb_collection: get_env_or("BBT_CHROMADB_COLLECTION", defaults.chromadb_collection),
@@ -118,6 +122,11 @@ pub fn from_env() -> Result<BbtConfig> {
 /// Get environment variable as string or use default
 fn get_env_or(key: &str, default: String) -> String {
     env::var(key).unwrap_or(default)
+}
+
+/// Get environment variable as string with fallback
+fn get_env_or_fallback(primary: &str, fallback: &str, default: String) -> String {
+    env::var(primary).unwrap_or_else(|_| env::var(fallback).unwrap_or(default))
 }
 
 /// Get environment variable as PathBuf or use default

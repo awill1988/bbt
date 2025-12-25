@@ -1,5 +1,9 @@
 use std::env;
+
+#[cfg(target_os = "linux")]
 use std::path::Path;
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,17 +38,16 @@ impl GpuConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn is_wsl() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(release) = std::fs::read_to_string("/proc/version") {
-            let release_lower = release.to_lowercase();
-            return release_lower.contains("microsoft") || release_lower.contains("wsl");
-        }
+    if let Ok(release) = std::fs::read_to_string("/proc/version") {
+        let release_lower = release.to_lowercase();
+        return release_lower.contains("microsoft") || release_lower.contains("wsl");
     }
     false
 }
 
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn has_vulkan() -> bool {
     Command::new("vulkaninfo")
         .arg("--summary")
@@ -53,62 +56,55 @@ fn has_vulkan() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn has_nvidia_gpu() -> bool {
-    #[cfg(not(target_os = "linux"))]
-    {
-        return false;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if is_wsl() {
-            let wsl_lib_dir = Path::new("/usr/lib/wsl/lib");
-            if wsl_lib_dir.join("libcuda.so.1").exists()
-                || wsl_lib_dir.join("nvidia-smi").exists()
-            {
-                return true;
-            }
-        }
-
-        let dev_dir = Path::new("/dev");
-        if dev_dir.join("nvidia0").exists() || dev_dir.join("nvidiactl").exists() {
+    if is_wsl() {
+        let wsl_lib_dir = Path::new("/usr/lib/wsl/lib");
+        if wsl_lib_dir.join("libcuda.so.1").exists()
+            || wsl_lib_dir.join("nvidia-smi").exists()
+        {
             return true;
         }
-
-        if let Ok(output) = Command::new("nvidia-smi").arg("-L").output() {
-            return output.status.success();
-        }
-
-        false
     }
+
+    let dev_dir = Path::new("/dev");
+    if dev_dir.join("nvidia0").exists() || dev_dir.join("nvidiactl").exists() {
+        return true;
+    }
+
+    if let Ok(output) = Command::new("nvidia-smi").arg("-L").output() {
+        return output.status.success();
+    }
+
+    false
 }
 
 pub fn detect_gpu_backend() -> GpuBackend {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        #[cfg(target_arch = "aarch64")]
+        GpuBackend::Metal
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        #[cfg(target_os = "linux")]
         {
-            return GpuBackend::Metal;
+            if has_nvidia_gpu() {
+                return GpuBackend::Cuda;
+            }
         }
-    }
 
-    #[cfg(target_os = "linux")]
-    {
-        if has_nvidia_gpu() {
-            return GpuBackend::Cuda;
+        if has_vulkan() {
+            return GpuBackend::Vulkan;
         }
-    }
 
-    if has_vulkan() {
-        return GpuBackend::Vulkan;
+        GpuBackend::Cpu
     }
-
-    GpuBackend::Cpu
 }
 
 pub fn get_gpu_config() -> GpuConfig {
     // check for force CPU override
-    let force_cpu = env::var("BOOKMARKS_FORCE_CPU")
+    let force_cpu = env::var("BBT_FORCE_CPU")
         .map(|v| {
             let v = v.to_lowercase();
             v == "1" || v == "true" || v == "yes"
@@ -136,7 +132,7 @@ pub fn get_gpu_config() -> GpuConfig {
     }
 
     // get layer count from env or default to -1 (all layers)
-    let n_gpu_layers = env::var("BOOKMARKS_GPU_LAYERS")
+    let n_gpu_layers = env::var("BBT_GPU_LAYERS")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(-1);

@@ -88,7 +88,7 @@ impl LlamaModel {
 
         // placeholder response for schema generation
         let output = format!(
-            "CREATE TABLE bookmarks (\n\
+            "CREATE TABLE items (\n\
              id INTEGER PRIMARY KEY AUTOINCREMENT,\n\
              url TEXT NOT NULL UNIQUE,\n\
              title TEXT,\n\

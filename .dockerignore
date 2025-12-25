@@ -1,0 +1,80 @@
+# git
+.git/
+.gitignore
+.gitattributes
+
+# build artifacts
+target/
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# ide
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# documentation
+*.md
+!README.md
+docs/
+examples/
+!examples/documents
+
+# docker
+.dockerignore
+docker-compose.yml
+Dockerfile
+.env
+.env.*
+
+# data directories
+data/
+models/
+documents/
+*.db
+*.sqlite
+
+# test data
+tests/
+benches/
+
+# ci/cd
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# nix
+flake.nix
+flake.lock
+.direnv/
+.envrc
+shell.nix
+
+# temporary files
+*.tmp
+*.log
+*.bak
+.DS_Store
+Thumbs.db
+
+# python (if any)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# node (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# other
+*.tar.gz
+*.zip
+*.7z

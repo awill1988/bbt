@@ -7,8 +7,7 @@ mod cmd;
 
 use clap::Parser;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = cmd::Cli::parse();
-    args.execute().await
+    cmd::run(args)
 }

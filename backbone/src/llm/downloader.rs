@@ -2,8 +2,8 @@ use crate::error::{BbtError, Result};
 use std::env;
 use std::path::PathBuf;
 
-const DEFAULT_REPO_ID: &str = "TheBloke/Llama-2-7B-Chat-GGUF";
-const DEFAULT_FILENAME: &str = "llama-2-7b-chat.Q4_K_M.gguf";
+const DEFAULT_REPO_ID: &str = "unsloth/Llama-3.1-Nemotron-Nano-8B-v1-GGUF";
+const DEFAULT_FILENAME: &str = "Llama-3.1-Nemotron-Nano-8B-v1-Q4_K_M.gguf";
 const DEFAULT_CACHE_DIR: &str = ".cache/models";
 
 pub fn ensure_gguf_model(
@@ -14,7 +14,7 @@ pub fn ensure_gguf_model(
     // read from environment variables if not provided
     let repo_id = repo_id
         .or_else(|| {
-            env::var("BOOKMARKS_SCHEMA_REPO_ID")
+            env::var("BBT_SCHEMA_REPO_ID")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
@@ -22,7 +22,7 @@ pub fn ensure_gguf_model(
 
     let filename = filename
         .or_else(|| {
-            env::var("BOOKMARKS_SCHEMA_FILENAME")
+            env::var("BBT_SCHEMA_FILENAME")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
@@ -30,7 +30,7 @@ pub fn ensure_gguf_model(
 
     let cache_dir = cache_dir
         .or_else(|| {
-            env::var("BOOKMARKS_CACHE_DIR")
+            env::var("BBT_CACHE_DIR")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)

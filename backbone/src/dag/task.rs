@@ -83,7 +83,7 @@ impl Task for JsonSchemaGenerationTask {
         tracing::info!("starting json schema generation");
 
         // rule-based conversion
-        let json_schema_value = to_json_schema(&ctx.schema, Some("bookmarks"))?;
+        let json_schema_value = to_json_schema(&ctx.schema, Some("data_schema"))?;
 
         // optional llm enhancement
         let final_schema = if self.enhance_with_llm {

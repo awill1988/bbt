@@ -1,7 +1,7 @@
 use crate::schema::{FieldHints, Schema};
 
 pub const SCHEMA_SYSTEM_PROMPT: &str =
-    "you generate deterministic sqlite ddl for bookmarks. \
+    "you generate deterministic sqlite ddl for the provided data. \
      output only a single create table statement. \
      no markdown, no commentary, no backticks, no multiple tables.";
 
@@ -32,7 +32,7 @@ pub fn build_schema_task_prompt(schema: &Schema, hints: &FieldHints) -> String {
     };
 
     format!(
-        "generate a single sqlite create table statement for bookmarks.\n\
+        "generate a single sqlite create table statement for the provided data.\n\
          - include url and title columns.\n\
          - include timestamp columns if present in the export.\n\
          - include folder/path metadata if present.\n\

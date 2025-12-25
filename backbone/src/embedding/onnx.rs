@@ -15,8 +15,8 @@ impl ExecutionProvider {
     /// Detect available execution providers
     /// Returns the best available provider
     pub fn detect() -> Self {
-        // check for CUDA availability
-        #[cfg(all(target_os = "linux", feature = "cuda"))]
+        // check for CUDA availability on Linux
+        #[cfg(target_os = "linux")]
         {
             if Self::is_cuda_available() {
                 return Self::Cuda;
@@ -28,7 +28,7 @@ impl ExecutionProvider {
     }
 
     /// Check if CUDA is available
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(target_os = "linux")]
     fn is_cuda_available() -> bool {
         // check for nvidia-smi or CUDA libraries
         std::process::Command::new("nvidia-smi")

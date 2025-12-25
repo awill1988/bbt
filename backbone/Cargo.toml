@@ -3,6 +3,11 @@ name = "backbone"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["pdf"]
+pdf = ["dep:pdfium-render", "dep:lopdf"]
+ocr = ["dep:tesseract"]
+
 [dependencies]
 thiserror = { workspace = true }
 anyhow = { workspace = true }
@@ -20,7 +25,18 @@ sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-segmentation = { workspace = true }
 chrono = { workspace = true }
-ort = { workspace = true, optional = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+walkdir = { workspace = true }
+lru = { workspace = true }
+ort = { workspace = true }
+
+# PDF processing
+pdfium-render = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
+
+# OCR
+tesseract = { workspace = true, optional = true }
 
 # LLM
 llm = { workspace = true }

@@ -8,5 +8,6 @@ pub mod config;
 pub mod document;
 pub mod storage;
 pub mod embedding;
+pub mod reranking;
 
 pub use error::{BbtError, Result};

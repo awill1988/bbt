@@ -84,6 +84,12 @@ impl Clone for BbtError {
             BbtError::ModelDownload(s) => BbtError::ModelDownload(s.clone()),
             BbtError::GpuDetection(s) => BbtError::GpuDetection(s.clone()),
             BbtError::Tracing(s) => BbtError::Tracing(s.clone()),
+            BbtError::Sqlite(e) => BbtError::Sqlite(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )),
+            )),
         }
     }
 }

@@ -10,4 +10,5 @@ result-*
 
 # cache directory (models, data, huggingface hub)
 .cache/
-data/*
+documents/
+data/

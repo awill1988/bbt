@@ -25,6 +25,9 @@ pub enum BbtError {
 
     #[error("tracing initialization failed: {0}")]
     Tracing(String),
+
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 pub type Result<T> = std::result::Result<T, BbtError>;

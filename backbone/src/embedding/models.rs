@@ -40,6 +40,17 @@ impl EmbeddingModelInfo {
         }
     }
 
+    /// nvidia nemotron embedding model (requires onnx export)
+    pub fn nemotron_8b() -> Self {
+        Self {
+            repo_id: "nvidia/llama-embed-nemotron-8b".to_string(),
+            model_file: "onnx/model.onnx".to_string(),
+            dimensions: 4096,
+            max_seq_len: 4096,
+            description: "nvidia nemotron 8b - state-of-the-art multilingual embeddings".to_string(),
+        }
+    }
+
     /// Create custom model info
     pub fn custom(repo_id: String, model_file: String, dimensions: usize, max_seq_len: usize) -> Self {
         Self {

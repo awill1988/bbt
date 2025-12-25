@@ -1,110 +1,293 @@
-# bookmarks
+# bbt (big brain time)
 
-Agent-driven CLI for organizing bookmarks using temporal embeddings.
+Rust-based RAG system with hybrid search (vector + BM25), PDF processing, and GPU acceleration.
 
-Combines semantic text embeddings with normalized temporal features to cluster bookmarks by both content similarity and time period. See [DESIGN.md](DESIGN.md) for implementation details and research foundations.
+## Quick Start
 
-## Setup
-
-**Prerequisites**: Nix and direnv installed.
+### Docker (Recommended)
 
 ```bash
-direnv allow              # or: nix develop
-uv sync                   # base dependencies
-uv sync --group torch     # add torch for visualization commands
+# start services
+docker compose up -d bbt-cpu qdrant otel-collector
+
+# check health
+curl http://localhost:8080/health
+
+# ingest documents
+curl -X POST http://localhost:8080/api/v1/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/app/documents", "recursive": true}'
+
+# query
+curl -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "your search", "mode": "hybrid", "top_k": 5}'
 ```
 
-This project builds with `maturin`, so a rust toolchain is required; the nix devshell includes `cargo`, `rustc`, and `maturin`.
+**GPU support (NVIDIA)**:
+```bash
+docker compose --profile nvidia up -d bbt
+```
 
-### GPU Acceleration
+### Native Build
 
-GPU acceleration is **automatically configured** when entering the nix shell:
-- **macOS (Apple Silicon)**: Metal backend
-- **Linux with NVIDIA GPU**: CUDA backend
-- **Linux/Other**: Vulkan fallback
+**Prerequisites**:
+- Rust 1.83+ (`rustup install stable`)
+- pdfium (`brew install pdfium` or `apt-get install libpdfium-dev`)
+- tesseract (optional, for OCR)
 
-The flake detects your hardware and sets `CMAKE_ARGS` automatically. After entering the shell, rebuild llama-cpp-python once:
+**Build**:
+```bash
+cargo build --release --locked
+./target/release/bbt --help
+```
+
+**macOS with Metal GPU** (4-6x faster than CPU):
+```bash
+# metal only works natively, not in docker
+brew install pdfium tesseract
+cargo build --release --locked
+
+# verify metal detection
+LOG_LEVEL=info ./target/release/bbt serve
+# should show: [INFO] detected execution provider: Metal
+
+# force cpu if needed
+export BBT_FORCE_CPU=1
+```
+
+## Commands
+
+### Ingest / Sync
+
+**Sync source code from git repositories:**
+```bash
+# default: scans git repos only, honors .gitignore, indexes code files
+bbt sync ~/projects
+
+# custom extensions
+bbt sync ./src --ext rs,toml,md
+
+# include all files (not just code)
+bbt sync ./docs --ext docs
+
+# disable git filtering
+bbt sync ./all --git-only false --honor-gitignore false
+
+# force reprocessing and reset state
+bbt sync ./docs --force
+bbt sync ./docs --reset-state
+```
+
+**Extension presets:**
+- `code` - js, jsx, ts, tsx, rust, go, python + config files (default)
+- `docs` - md, txt, rst, adoc
+- custom - specify exact extensions: `--ext rs,toml,py`
+
+### Query
+```bash
+bbt query --query "search text"
+bbt query --query "search text" --mode vector --top-k 10
+bbt query --query "search text" --mode bm25 --show-scores
+bbt query --query "search text" --citation-mode hash
+BBT_CITATION_SECRET=local_dev_secret bbt query --query "search text" --citation-mode hash
+```
+note: bm25/hybrid modes currently fall back to vector retrieval.
+
+### Serve
+```bash
+bbt serve --host 0.0.0.0 --port 8080
+```
+
+## Configuration
+
+Create `.env`:
+```bash
+# data
+BBT_DATA_DIR=./data
+BBT_QDRANT_URL=http://localhost:6334
+BBT_STATE_STORE_PATH=./data/state.db
+# use .db/.sqlite for sqlite, .json for legacy json state
+
+# chunking
+BBT_CHUNK_SIZE=512
+BBT_CHUNK_OVERLAP=128
+
+# embedding
+BBT_EMBEDDING_MODEL_REPO=BAAI/bge-small-en-v1.5
+BBT_EMBEDDING_BATCH_SIZE=32
+
+# retrieval
+BBT_RETRIEVAL_MODE=hybrid
+BBT_TOP_K=20
+BBT_VECTOR_WEIGHT=0.7
+BBT_BM25_WEIGHT=0.3
+
+# gpu
+BBT_FORCE_CPU=0  # 0=auto-detect gpu, 1=force cpu
+
+# tracing
+BBT_ENABLE_TRACING=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# logging
+LOG_LEVEL=info
+
+# sync control
+BBT_FORCE_SYNC=false
+BBT_RESET_STATE=false
+```
+
+## API Endpoints
 
 ```bash
-uv pip install --force-reinstall --no-cache-dir llama-cpp-python
+# health
+GET /health
+
+# ingest
+POST /api/v1/ingest
+{
+  "path": "./documents",
+  "recursive": true,
+  "chunk_size": 512,
+  "enable_ocr": false
+}
+
+# query
+POST /api/v1/query
+{
+  "query": "search text",
+  "mode": "hybrid",
+  "top_k": 5,
+  "show_scores": true
+}
+
+# status
+GET /api/v1/status
+
+# clear cache
+DELETE /api/v1/cache
 ```
 
-This provides **5-10x speedup** for schema generation.
-
-**Disable GPU**: `export BOOKMARKS_FORCE_CPU=1` before running commands.
-
-## Model Configuration
-
-Schema generation commands automatically download GGUF models from HuggingFace Hub on first use. Models are cached in the `models/` directory.
-
-**Default model**: TheBloke/Llama-2-7B-Chat-GGUF (Q4_K_M quantization, ~4GB)
-
-**Override defaults** via environment variables:
-```bash
-export BOOKMARKS_SCHEMA_REPO_ID="TheBloke/CodeLlama-7B-GGUF"
-export BOOKMARKS_SCHEMA_FILENAME="codellama-7b.Q4_K_M.gguf"
-```
-
-**First-time usage**: Models download automatically when running:
-```bash
-uv run bookmarks gen schema -i bookmarks.json
-uv run bookmarks gen schema-graph -i bookmarks.json --output schema.sql
-```
-
-## Command reference
-
-### Generation commands
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `gen export` | Generate embeddings from bookmark JSON and store in SQLite | `uv run bookmarks gen export -i bookmarks.json --db-path vectors.db` |
-| `gen torch` | Export SQLite embeddings to Torch artifact | `uv run bookmarks gen torch --db-path vectors.db --output vectors.pt` |
-| `gen schema-graph` | Infer JSON schema and generate SQL DDL via smolagents | `uv run bookmarks gen schema-graph -i bookmarks.json --output schema.sql` |
-
-### Visualization commands
-
-Requires `--group torch` dependencies.
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `vis summary` | Inspect torch artifact metadata | `uv run bookmarks vis summary --artifact vectors.pt --limit 5` |
-| `vis organize` | Multi-resolution clustering for organization (by year, quarter, month) | `uv run bookmarks vis organize --artifact vectors.pt --resolutions all,year,quarter --output organize.json` |
-| `vis neighbors` | Find nearest neighbors by cosine similarity with dates | `uv run bookmarks vis neighbors --artifact vectors.pt --index 0 --top-k 5` |
-
-### Common flags
-
-- `--artifact PATH`: Torch file to analyze (default: `vectors.pt`)
-- `--db-path PATH`: SQLite database path (default: `vectors.db`)
-- `--clusters N`: Number of k-means clusters (default: 6)
-- `--include-stop-words`: Include stop words in token analysis (default: filter them)
-
-## Quick workflow
+## Docker Build
 
 ```bash
-# 1. generate embeddings with temporal features
-uv run bookmarks gen export -i bookmarks.json --db-path vectors.db
+# cpu build
+docker build --build-arg ENABLE_GPU=false -t bbt:cpu .
 
-# 2. export to torch for visualization
-uv run bookmarks gen torch --db-path vectors.db --output vectors.pt
+# gpu build (nvidia)
+docker build --build-arg ENABLE_GPU=true -t bbt:gpu .
 
-# 3. organize bookmarks (multi-resolution clustering)
-uv run bookmarks vis organize --artifact vectors.pt --resolutions all,year --output organize.json
+# multi-arch (linux/amd64,linux/arm64)
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --build-arg ENABLE_GPU=false \
+  -t bbt:latest .
 
-# 4. find similar bookmarks
-uv run bookmarks vis neighbors --artifact vectors.pt --index 0
+# or use script
+./scripts/build-docker.sh --cpu --tag v1.0.0
+./scripts/build-docker.sh --gpu --tag v1.0.0-gpu
 ```
 
-## Tracing (phoenix)
+## Architecture
 
-Start a local otel collector:
+```
+bbt/           - cli binary (ingest, query, serve, gen)
+backbone/      - core library
+  ├── config/      - configuration
+  ├── document/    - pdf/text processing, chunking
+  ├── embedding/   - onnx embedding (metal/cuda/cpu)
+  ├── storage/     - state tracking, metadata
+  ├── agent/       - llm agents
+  ├── dag/         - task orchestration
+  └── tracing/     - opentelemetry
+```
+
+## GPU Support
+
+**Auto-detected** for embedding generation:
+- **macOS (M1/M2/M3)**: Metal backend (native build only, not docker)
+- **Linux + NVIDIA**: CUDA backend (requires nvidia-docker)
+- **Other**: CPU fallback
+
+**Performance (embedding generation)**:
+| Platform | Backend | Throughput | Speedup |
+|----------|---------|------------|---------|
+| M1 Pro | Metal | ~800 chunks/sec | 5x |
+| M2 Max | Metal | ~1200 chunks/sec | 5x |
+| M3 Max | Metal | ~1500 chunks/sec | 5x |
+| RTX 3090 | CUDA | ~2000 chunks/sec | 8x |
+
+**Note**: Docker on macOS runs Linux VM without Metal. Use native build for GPU on Mac.
+
+## Services
+
+**Qdrant** (vector database):
+```bash
+docker run -p 6333:6333 -p 6334:6334 -v ./qdrant:/qdrant/storage qdrant/qdrant
+# ui: http://localhost:6333/dashboard
+```
+note: bbt connects to qdrant over grpc on port 6334.
+
+**Langfuse** (observability):
+```bash
+docker compose up -d langfuse-web
+# ui: http://localhost:3000
+# login: dev@example.com / local_dev_password
+```
+
+## Development
 
 ```bash
-docker compose up -d otel-collector
+# test
+cargo test --workspace
+
+# run
+cargo run --release -- serve
+
+# format
+cargo fmt
+
+# lint
+cargo clippy -- -D warnings
+
+# with tracing
+LOG_LEVEL=debug cargo run -- ingest ./documents
 ```
 
-Enable tracing export:
+## Troubleshooting
 
+**pdfium not found**:
 ```bash
-export PHOENIX_COLLECTOR_ENDPOINT="http://localhost:4317"
-export BOOKMARKS_ENABLE_TRACING=1
+brew install pdfium  # macos
+apt-get install libpdfium-dev  # linux
 ```
+
+**qdrant connection refused**:
+```bash
+docker compose ps qdrant
+docker compose restart qdrant
+curl http://localhost:6333/collections
+```
+
+**slow embeddings**:
+```bash
+# enable gpu (unset force_cpu)
+unset BBT_FORCE_CPU
+
+# increase batch size
+export BBT_EMBEDDING_BATCH_SIZE=64
+```
+
+**metal not detected (macos)**:
+```bash
+# verify metal support
+LOG_LEVEL=debug ./target/release/bbt serve 2>&1 | grep -i metal
+
+# check not running in docker
+uname -s  # should be "Darwin", not "Linux"
+```
+
+## License
+
+MIT

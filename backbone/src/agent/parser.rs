@@ -51,21 +51,21 @@ mod tests {
 
     #[test]
     fn test_extract_create_table_plain() {
-        let input = "CREATE TABLE bookmarks (id INTEGER PRIMARY KEY);";
+        let input = "CREATE TABLE items (id INTEGER PRIMARY KEY);";
         let result = extract_create_table(input).unwrap();
         assert!(result.starts_with("CREATE TABLE"));
     }
 
     #[test]
     fn test_extract_create_table_with_fence() {
-        let input = "```sql\nCREATE TABLE bookmarks (id INTEGER PRIMARY KEY);\n```";
+        let input = "```sql\nCREATE TABLE items (id INTEGER PRIMARY KEY);\n```";
         let result = extract_create_table(input).unwrap();
         assert!(result.starts_with("CREATE TABLE"));
     }
 
     #[test]
     fn test_extract_create_table_case_insensitive() {
-        let input = "create table bookmarks (id integer primary key);";
+        let input = "create table items (id integer primary key);";
         let result = extract_create_table(input).unwrap();
         assert!(result.to_lowercase().contains("create table"));
     }
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_extract_create_table_missing_fails() {
-        let input = "SELECT * FROM bookmarks;";
+        let input = "SELECT * FROM items;";
         let result = extract_create_table(input);
         assert!(result.is_err());
     }

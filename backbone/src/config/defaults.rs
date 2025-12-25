@@ -10,12 +10,10 @@ pub fn default_config() -> BbtConfig {
 
         // Paths
         data_dir: PathBuf::from("./data"),
-        model_cache_dir: dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("./.cache"))
-            .join("bbt/models"),
+        model_cache_dir: PathBuf::from("./.cache/models"),
         vector_store_path: PathBuf::from("./data/vector_store"),
         bm25_index_path: PathBuf::from("./data/bm25_index.jsonl"),
-        state_store_path: PathBuf::from("./data/state.json"),
+        state_store_path: PathBuf::from("./data/state.db"),
 
         // Document processing
         chunk_size: 512,

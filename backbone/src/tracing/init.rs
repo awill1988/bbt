@@ -2,6 +2,11 @@ use crate::error::Result;
 use opentelemetry::{trace::TracerProvider as _, KeyValue};
 use opentelemetry_sdk::Resource;
 use std::env;
+use std::sync::mpsc::Sender;
+use tracing::{Event, Subscriber};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -21,8 +26,61 @@ impl Drop for OtelGuard {
     }
 }
 
-pub fn init_tracing(service_name: &str) -> Result<OtelGuard> {
-    let enabled = env::var("BOOKMARKS_ENABLE_TRACING")
+struct LogLineLayer {
+    sender: Sender<String>,
+}
+
+impl LogLineLayer {
+    fn new(sender: Sender<String>) -> Self {
+        Self { sender }
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+}
+
+impl Visit for MessageVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" && self.message.is_none() {
+            self.message = Some(format!("{value:?}"));
+        }
+    }
+}
+
+impl<S> Layer<S> for LogLineLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+
+        let level = event.metadata().level().as_str().to_lowercase();
+        let message = visitor
+            .message
+            .unwrap_or_else(|| event.metadata().target().to_string());
+        let message = message.trim_matches('"');
+
+        let line = if message.is_empty() {
+            level
+        } else {
+            format!("{level} {message}")
+        };
+
+        let _ = self.sender.send(line);
+    }
+}
+
+pub fn init_tracing(service_name: &str, log_sender: Option<Sender<String>>) -> Result<OtelGuard> {
+    let enabled = env::var("BBT_ENABLE_TRACING")
         .map(|v| {
             let v = v.to_lowercase();
             v == "1" || v == "true" || v == "yes"
@@ -33,15 +91,21 @@ pub fn init_tracing(service_name: &str) -> Result<OtelGuard> {
         .or_else(|_| env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
         .ok();
 
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     if !enabled || endpoint.is_none() {
         // tracing not enabled, just set up basic logging
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-            )
-            .finish();
-
-        subscriber.init();
+        if let Some(sender) = log_sender {
+            let subscriber = tracing_subscriber::registry()
+                .with(LogLineLayer::new(sender))
+                .with(env_filter);
+            subscriber.init();
+        } else {
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+                .with(env_filter);
+            subscriber.init();
+        }
 
         tracing::info!("basic logging initialized (service={})", service_name);
 
@@ -74,12 +138,19 @@ pub fn init_tracing(service_name: &str) -> Result<OtelGuard> {
     let telemetry = tracing_opentelemetry::layer().with_tracer(provider.tracer(service_name.to_string()));
 
     // combine telemetry layer with fmt layer for console output
-    let subscriber = tracing_subscriber::registry()
-        .with(telemetry)
-        .with(tracing_subscriber::fmt::layer())
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()));
-
-    subscriber.init();
+    if let Some(sender) = log_sender {
+        let subscriber = tracing_subscriber::registry()
+            .with(telemetry)
+            .with(LogLineLayer::new(sender))
+            .with(env_filter);
+        subscriber.init();
+    } else {
+        let subscriber = tracing_subscriber::registry()
+            .with(telemetry)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+            .with(env_filter);
+        subscriber.init();
+    }
 
     tracing::info!(
         "opentelemetry tracing initialized for {} (endpoint: {})",
@@ -99,7 +170,7 @@ mod tests {
     #[test]
     fn test_init_tracing_without_endpoint() {
         // should succeed but not enable otel
-        let guard = init_tracing("test");
+        let guard = init_tracing("test", None);
         assert!(guard.is_ok());
     }
 }

@@ -228,7 +228,7 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
     for ext in ext_list {
         match ext.to_lowercase().as_str() {
             "code" => {
-                // source code preset: js, ts, rust, go, python
+                // source code preset: comprehensive language support
                 let code_exts = [
                     // javascript/typescript
                     "js", "jsx", "ts", "tsx", "mjs", "cjs",
@@ -238,6 +238,15 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
                     "go", "mod", "sum",
                     // python
                     "py", "pyi", "pyx",
+                    // c/c++/clang
+                    "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx", "inl",
+                    // bash/shell
+                    "sh", "bash", "zsh", "fish",
+                    // terraform/hcl
+                    "tf", "tfvars", "hcl",
+                    // template files
+                    "j2", "jinja", "jinja2", "hbs", "handlebars", "mustache",
+                    "tmpl", "template", "erb", "ejs", "tpl",
                     // common config/doc files
                     "toml", "yaml", "yml", "json", "md",
                 ];

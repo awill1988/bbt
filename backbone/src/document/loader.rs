@@ -31,10 +31,41 @@ impl DocumentFormat {
                 "md" | "markdown" => Some(Self::Markdown),
                 "json" | "jsonc" => Some(Self::Json),
                 // source code files - treat as text
-                "rs" | "py" | "pyi" | "pyx" |
-                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" |
-                "go" | "mod" | "sum" |
-                "toml" | "yaml" | "yml" => Some(Self::Text),
+                // javascript/typescript
+                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Some(Self::Text),
+                // rust
+                "rs" => Some(Self::Text),
+                // golang
+                "go" | "mod" | "sum" => Some(Self::Text),
+                // python
+                "py" | "pyi" | "pyx" => Some(Self::Text),
+                // c/c++/clang
+                "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "inl" => Some(Self::Text),
+                // assembly (note: uppercase S is preprocessed assembly, but extension matching is case-insensitive)
+                "asm" | "s" => Some(Self::Text),
+                // bash/shell
+                "sh" | "bash" | "zsh" | "fish" => Some(Self::Text),
+                // terraform/hcl
+                "tf" | "tfvars" | "hcl" => Some(Self::Text),
+                // ios development
+                "swift" | "m" | "mm" | "xib" | "storyboard" | "plist" | "xcconfig" => Some(Self::Text),
+                // android development
+                "kt" | "kts" | "java" | "xml" | "gradle" | "pro" => Some(Self::Text),
+                // build systems
+                "cmake" | "mk" | "ninja" | "bzl" | "bazel" => Some(Self::Text),
+                // visual studio / msbuild
+                "vcxproj" | "sln" | "props" | "targets" | "csproj" | "vbproj" | "fsproj" => Some(Self::Text),
+                // linker and compiler
+                "ld" | "lds" | "pc" => Some(Self::Text),
+                // template files
+                "j2" | "jinja" | "jinja2" | "hbs" | "handlebars" | "mustache" |
+                "tmpl" | "template" | "erb" | "ejs" | "tpl" => Some(Self::Text),
+                // diagram/graph formats
+                "mmd" | "mermaid" | "dot" | "gv" | "puml" | "plantuml" | "pu" | "d2" => Some(Self::Text),
+                // documentation formats
+                "org" | "tex" | "latex" | "adoc" | "asciidoc" | "rst" => Some(Self::Text),
+                // config files
+                "toml" | "yaml" | "yml" | "ini" | "conf" | "config" => Some(Self::Text),
                 _ => None,
             })
     }

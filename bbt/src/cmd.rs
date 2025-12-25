@@ -1224,7 +1224,9 @@ fn right_align_truncate(value: &str, width: usize) -> String {
 
 async fn query_documents(args: QueryCommand) -> Result<()> {
     use backbone::config::{BbtConfig, RetrievalMode};
-    use backbone::embedding::{ensure_onnx_model, EmbeddingModelInfo, ExecutionProvider, OnnxEmbedder};
+    use backbone::embedding::{ensure_onnx_model, EmbeddingModelInfo, OnnxEmbedder};
+    use backbone::embedding::ExecutionProvider as EmbeddingExecutionProvider;
+    use backbone::reranking::{ensure_rerank_model, ExecutionProvider as RerankExecutionProvider, OnnxReranker, RerankModelInfo};
     use backbone::tracing::init_tracing;
     use qdrant_client::qdrant::SearchPointsBuilder;
     use qdrant_client::Qdrant;
@@ -1259,7 +1261,7 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
 
     let model_info = EmbeddingModelInfo::default_model();
     let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
-    let embedder = OnnxEmbedder::new(&model_path, model_info, ExecutionProvider::detect())?;
+    let embedder = OnnxEmbedder::new(&model_path, model_info, EmbeddingExecutionProvider::detect())?;
 
     let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
         Qdrant::from_url(&config.qdrant_url)
@@ -1287,8 +1289,13 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
         anyhow::bail!("collection '{}' not found, run sync first", collection_name);
     }
 
+    // calculate initial retrieval limit
+    // if reranking is enabled, retrieve more candidates for better recall
+    let rerank_multiplier = if config.enable_rerank { 3 } else { 1 };
+    let initial_limit = config.top_k * rerank_multiplier;
+
     let mut search_builder =
-        SearchPointsBuilder::new(collection_name, query_vector, config.top_k as u64)
+        SearchPointsBuilder::new(collection_name.clone(), query_vector, initial_limit as u64)
             .with_payload(true);
 
     if let Some(filter) = build_query_filter(&args) {
@@ -1296,8 +1303,9 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
     }
 
     let response = qdrant_client.search_points(search_builder).await?;
-    let mut results: Vec<QueryResultOutput> = Vec::new();
 
+    // convert qdrant results to intermediate format
+    let mut candidates: Vec<QueryResultOutput> = Vec::new();
     for point in response.result {
         let payload = point.payload;
         let text = payload
@@ -1312,7 +1320,7 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
         let source = display_source(source_raw.as_deref(), args.citation_mode);
         let id = point_id_to_string(point.id);
 
-        results.push(QueryResultOutput {
+        candidates.push(QueryResultOutput {
             id,
             score: point.score,
             text,
@@ -1320,6 +1328,60 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
             source,
         });
     }
+
+    // apply reranking if enabled
+    let results = if config.enable_rerank && !candidates.is_empty() {
+        tracing::info!("reranking {} candidates", candidates.len());
+
+        // load reranker model
+        let rerank_model_info = RerankModelInfo::custom(
+            config.rerank_model_repo.clone(),
+            config.rerank_model_file.clone(),
+            512,
+            true,
+        );
+        let rerank_model_path = ensure_rerank_model(&rerank_model_info, &config.model_cache_dir)?;
+        let reranker = OnnxReranker::new(
+            &rerank_model_path,
+            rerank_model_info,
+            RerankExecutionProvider::detect(),
+        )?;
+
+        // create (query, document) pairs
+        let pairs: Vec<(String, String)> = candidates
+            .iter()
+            .map(|candidate| (query.to_string(), candidate.text.clone()))
+            .collect();
+
+        // score with reranker
+        let rerank_scores = reranker.score_batch(&pairs)?;
+
+        // combine candidates with rerank scores
+        let mut ranked: Vec<(QueryResultOutput, f32)> = candidates
+            .into_iter()
+            .zip(rerank_scores.into_iter())
+            .collect();
+
+        // sort by rerank score (descending)
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // take top rerank_top_k results
+        let final_limit = config.rerank_top_k.min(ranked.len());
+        let mut final_results: Vec<QueryResultOutput> = ranked
+            .into_iter()
+            .take(final_limit)
+            .map(|(mut result, rerank_score)| {
+                result.score = rerank_score;
+                result
+            })
+            .collect();
+
+        tracing::info!("reranking complete, returning {} results", final_results.len());
+        final_results
+    } else {
+        // no reranking, use original vector search results
+        candidates.into_iter().take(config.top_k).collect()
+    };
 
     match args.format {
         OutputFormat::Json => {

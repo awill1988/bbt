@@ -1,20 +1,43 @@
 services:
-  bookmarks:
-    image: bookmarks:latest
+  bbt:
+    image: bbt:latest
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ENABLE_GPU: true
+        RUST_VERSION: "nightly"
+        CUDA_VERSION: "12.4.0"
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - BOOKMARKS_ENABLE_TRACING=${BOOKMARKS_ENABLE_TRACING:-false}
+      - BBT_ENABLE_TRACING=${BBT_ENABLE_TRACING:-true}
       - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://otel-collector:4317}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       - HF_HOME=/app/.cache
+      - BBT_DATA_DIR=/app/data
+      - BBT_QDRANT_URL=http://qdrant:6333
+      - BBT_STATE_STORE_PATH=/app/data/state.db
+      - BBT_VECTOR_STORE_TYPE=qdrant
+      - BBT_RETRIEVAL_MODE=hybrid
+      - BBT_TOP_K=20
+      - BBT_VECTOR_WEIGHT=0.5
+      - BBT_BM25_WEIGHT=0.5
+      - BBT_MIN_SCORE=0.5
+      - BBT_CHUNK_SIZE=512
+      - BBT_CHUNK_OVERLAP=128
+      - BBT_FORCE_SYNC=false
+      - BBT_RESET_STATE=false
     volumes:
       - model_cache:/app/.cache
+      - ./documents:/app/documents
       - ./data:/app/data
-    command: gen schema --input data/bookmarks.json --output data/bookmarks.sql
+    depends_on:
+      - qdrant
+      - otel-collector
+    command: serve --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
     deploy:
       resources:
         reservations:
@@ -24,6 +47,59 @@ services:
               capabilities: [gpu]
     profiles:
       - nvidia
+
+  bbt-cpu:
+    image: bbt:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ENABLE_GPU: false
+        RUST_VERSION: "nightly"
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - BBT_ENABLE_TRACING=${BBT_ENABLE_TRACING:-true}
+      - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://otel-collector:4317}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      - HF_HOME=/app/.cache
+      - BBT_DATA_DIR=/app/data
+      - BBT_QDRANT_URL=http://qdrant:6333
+      - BBT_STATE_STORE_PATH=/app/data/state.db
+      - BBT_VECTOR_STORE_TYPE=qdrant
+      - BBT_RETRIEVAL_MODE=hybrid
+      - BBT_TOP_K=20
+      - BBT_VECTOR_WEIGHT=0.5
+      - BBT_BM25_WEIGHT=0.5
+      - BBT_MIN_SCORE=0.5
+      - BBT_CHUNK_SIZE=512
+      - BBT_CHUNK_OVERLAP=128
+      - BBT_FORCE_SYNC=false
+      - BBT_RESET_STATE=false
+      - BBT_FORCE_CPU=1
+    volumes:
+      - model_cache:/app/.cache
+      - ./data:/app/data
+      - ./documents:/app/documents
+    depends_on:
+      - qdrant
+      - otel-collector
+    command: serve --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    profiles:
+      - cpu
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
@@ -153,6 +229,7 @@ services:
 
 volumes:
   model_cache:
+  qdrant_data:
   postgres_data:
   clickhouse_data:
   minio_data:

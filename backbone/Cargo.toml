@@ -1,0 +1,66 @@
+[package]
+name = "backbone"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["pdf"]
+pdf = ["dep:pdfium-render", "dep:lopdf"]
+ocr = ["dep:tesseract"]
+cuda = ["ort/cuda"]
+coreml = ["ort/coreml"]
+
+[dependencies]
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+json5 = { workspace = true }
+rkyv = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+rand = { workspace = true }
+dirs = { workspace = true }
+sha2 = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-segmentation = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+walkdir = { workspace = true }
+lru = { workspace = true }
+ort = { workspace = true }
+tokenizers = { workspace = true }
+rayon = { workspace = true }
+
+# PDF processing
+pdfium-render = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
+
+# OCR
+tesseract = { workspace = true, optional = true }
+
+# LLM
+llm = { workspace = true }
+hf-hub = { workspace = true }
+
+# OTEL
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-resource-detectors = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+tracing = { workspace = true }
+tracing-core = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+# Git
+git2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

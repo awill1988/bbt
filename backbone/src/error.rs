@@ -11,6 +11,9 @@ pub enum BbtError {
     #[error("model error: {0}")]
     Model(String),
 
+    #[error("embedding error: {0}")]
+    Embedding(String),
+
     #[error("schema inference error: {0}")]
     Schema(String),
 

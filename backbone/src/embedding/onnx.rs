@@ -1,6 +1,10 @@
 use crate::error::{BbtError, Result};
 use crate::embedding::models::EmbeddingModelInfo;
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
+use ort::value::Tensor;
 use std::path::Path;
+use tokenizers::Tokenizer;
 
 /// ONNX execution provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,16 +51,11 @@ impl ExecutionProvider {
 }
 
 /// ONNX-based embedding generator
-///
-/// This is a placeholder implementation that defines the interface.
-/// Full implementation requires:
-/// - ONNX model files
-/// - ort crate integration
-/// - Tokenizer integration
 pub struct OnnxEmbedder {
+    session: Session,
+    tokenizer: Tokenizer,
     model_info: EmbeddingModelInfo,
     provider: ExecutionProvider,
-    _model_path: std::path::PathBuf,
 }
 
 impl OnnxEmbedder {
@@ -71,7 +70,7 @@ impl OnnxEmbedder {
         model_info: EmbeddingModelInfo,
         provider: ExecutionProvider,
     ) -> Result<Self> {
-        let model_path = model_path.as_ref().to_path_buf();
+        let model_path = model_path.as_ref();
 
         if !model_path.exists() {
             return Err(BbtError::Model(format!(
@@ -79,6 +78,22 @@ impl OnnxEmbedder {
                 model_path.display()
             )));
         }
+
+        // load onnx session
+        let session = Session::builder()
+            .map_err(|e| BbtError::Model(format!("failed to create session builder: {}", e)))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?
+            .commit_from_file(model_path)
+            .map_err(|e| BbtError::Model(format!("failed to load model from {:?}: {}", model_path, e)))?;
+
+        // load tokenizer (expects tokenizer.json in same directory as model)
+        let tokenizer_path = model_path.parent()
+            .ok_or_else(|| BbtError::Model("invalid model path".to_string()))?
+            .join("tokenizer.json");
+
+        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| BbtError::Model(format!("failed to load tokenizer from {:?}: {}", tokenizer_path, e)))?;
 
         tracing::info!(
             model = %model_info.repo_id,
@@ -88,9 +103,10 @@ impl OnnxEmbedder {
         );
 
         Ok(Self {
+            session,
+            tokenizer,
             model_info,
             provider,
-            _model_path: model_path,
         })
     }
 
@@ -101,7 +117,7 @@ impl OnnxEmbedder {
     ///
     /// # Returns
     /// Vector of embedding vectors (one per input text)
-    pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -112,18 +128,156 @@ impl OnnxEmbedder {
             "generating embeddings"
         );
 
-        // todo: implement actual ONNX inference
-        // this is a placeholder that returns zero vectors
-        // real implementation would:
-        // 1. tokenize texts
-        // 2. run ONNX inference
-        // 3. extract embeddings from output
-        // 4. apply pooling (mean pooling typically)
+        // tokenize all texts
+        let encodings = self.tokenizer
+            .encode_batch(texts.to_vec(), true)
+            .map_err(|e| BbtError::Embedding(format!("tokenization failed: {}", e)))?;
 
-        let embeddings = texts
+        // prepare input tensors
+        let batch_size = encodings.len();
+        // cap max_len to model's maximum sequence length to avoid ONNX errors
+        let model_max_len = self.model_info.max_seq_len;
+        let max_len = encodings
             .iter()
-            .map(|_| vec![0.0; self.model_info.dimensions])
-            .collect();
+            .map(|e| e.len())
+            .max()
+            .unwrap_or(0)
+            .min(model_max_len);
+
+        tracing::debug!(
+            "batch_size={}, max_len={}, model_max_len={}",
+            batch_size,
+            max_len,
+            model_max_len
+        );
+
+        // create input_ids tensor with padding
+        let mut input_ids_vec = Vec::with_capacity(batch_size * max_len);
+        let mut attention_mask_vec = Vec::with_capacity(batch_size * max_len);
+
+        for encoding in &encodings {
+            let ids = encoding.get_ids();
+            let attention = encoding.get_attention_mask();
+            let seq_len = ids.len();
+
+            // truncate if exceeds max_len
+            let truncated_len = seq_len.min(max_len);
+
+            // add the actual tokens (truncated if necessary)
+            input_ids_vec.extend_from_slice(&ids[..truncated_len]);
+            attention_mask_vec.extend_from_slice(&attention[..truncated_len]);
+
+            // pad to max_len with zeros (padding token id is typically 0)
+            if truncated_len < max_len {
+                input_ids_vec.resize(input_ids_vec.len() + (max_len - truncated_len), 0);
+                attention_mask_vec.resize(attention_mask_vec.len() + (max_len - truncated_len), 0);
+            }
+        }
+
+        // convert to i64 for onnx
+        let input_ids: Vec<i64> = input_ids_vec.iter().map(|&x| x as i64).collect();
+        let attention_mask: Vec<i64> = attention_mask_vec.iter().map(|&x| x as i64).collect();
+
+        // create onnx tensors
+        let input_ids_tensor = Tensor::from_array((vec![batch_size, max_len], input_ids.into_boxed_slice()))
+            .map_err(|e| BbtError::Embedding(format!("failed to create input_ids tensor: {}", e)))?;
+
+        let attention_mask_tensor = Tensor::from_array((vec![batch_size, max_len], attention_mask.into_boxed_slice()))
+            .map_err(|e| BbtError::Embedding(format!("failed to create attention_mask tensor: {}", e)))?;
+
+        // check if model expects token_type_ids (bert-based models only)
+        let requires_token_type_ids = self.session
+            .inputs
+            .iter()
+            .any(|input| input.name == "token_type_ids");
+
+        // run inference with appropriate inputs
+        let outputs = if requires_token_type_ids {
+            // bert-based models (bge-small, etc.)
+            let token_type_ids: Vec<i64> = vec![0i64; batch_size * max_len];
+            let token_type_ids_tensor = Tensor::from_array((vec![batch_size, max_len], token_type_ids.into_boxed_slice()))
+                .map_err(|e| BbtError::Embedding(format!("failed to create token_type_ids tensor: {}", e)))?;
+
+            self.session
+                .run(ort::inputs![
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor,
+                    "token_type_ids" => token_type_ids_tensor
+                ])
+                .map_err(|e| BbtError::Embedding(format!("onnx inference failed: {}", e)))?
+        } else {
+            // modern models (jina, etc.) - no token_type_ids
+            self.session
+                .run(ort::inputs![
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor
+                ])
+                .map_err(|e| BbtError::Embedding(format!("onnx inference failed: {}", e)))?
+        };
+
+        // extract last hidden state (output is typically "last_hidden_state")
+        let output_tensor = outputs.get("last_hidden_state")
+            .or_else(|| outputs.get("logits"))
+            .ok_or_else(|| BbtError::Embedding("no output from model".to_string()))?;
+
+        let (shape, output_data) = output_tensor.try_extract_tensor::<f32>()
+            .map_err(|e| BbtError::Embedding(format!("failed to extract output tensor: {}", e)))?;
+
+        if shape.len() != 3 {
+            return Err(BbtError::Embedding(format!(
+                "unexpected output shape: {:?}, expected [batch, seq_len, hidden_size]",
+                shape
+            )));
+        }
+
+        let hidden_size = shape[2] as usize;
+        let seq_len = shape[1] as usize;
+
+        // apply mean pooling with attention mask
+        let mut embeddings = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            let mut pooled = vec![0.0f32; hidden_size];
+            let mut sum_mask = 0.0f32;
+
+            // get attention mask for this batch item
+            let mask_start = i * max_len;
+            let mask_end = mask_start + seq_len;
+            let mask_slice = &attention_mask_vec[mask_start..mask_end];
+
+            for j in 0..seq_len {
+                if mask_slice[j] == 1 {
+                    // calculate flat index: [batch, seq, hidden] -> batch * (seq_len * hidden_size) + seq * hidden_size + hidden
+                    let base_idx = (i * seq_len + j) * hidden_size;
+                    for k in 0..hidden_size {
+                        pooled[k] += output_data[base_idx + k];
+                    }
+                    sum_mask += 1.0;
+                }
+            }
+
+            // average
+            if sum_mask > 0.0 {
+                for val in &mut pooled {
+                    *val /= sum_mask;
+                }
+            }
+
+            // normalize (l2 normalization for BGE models)
+            let norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for val in &mut pooled {
+                    *val /= norm;
+                }
+            }
+
+            embeddings.push(pooled);
+        }
+
+        tracing::debug!(
+            "generated {} embeddings with dimension {}",
+            embeddings.len(),
+            self.model_info.dimensions
+        );
 
         Ok(embeddings)
     }

@@ -3,7 +3,7 @@ use crate::embedding::onnx::OnnxEmbedder;
 
 /// Batch embedding processor
 pub struct BatchEmbedder<'a> {
-    embedder: &'a OnnxEmbedder,
+    embedder: &'a mut OnnxEmbedder,
     batch_size: usize,
 }
 
@@ -13,7 +13,7 @@ impl<'a> BatchEmbedder<'a> {
     /// # Arguments
     /// * `embedder` - The ONNX embedder to use
     /// * `batch_size` - Number of texts to process per batch
-    pub fn new(embedder: &'a OnnxEmbedder, batch_size: usize) -> Self {
+    pub fn new(embedder: &'a mut OnnxEmbedder, batch_size: usize) -> Self {
         Self {
             embedder,
             batch_size,
@@ -27,7 +27,7 @@ impl<'a> BatchEmbedder<'a> {
     ///
     /// # Returns
     /// Vector of embeddings (one per input text)
-    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }

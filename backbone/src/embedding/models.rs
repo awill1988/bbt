@@ -18,8 +18,19 @@ pub struct EmbeddingModelInfo {
 }
 
 impl EmbeddingModelInfo {
-    /// Default embedding model: BAAI/bge-small-en-v1.5
+    /// Default embedding model: jina-embeddings-v2-base-code (optimized for code)
     pub fn default_model() -> Self {
+        Self {
+            repo_id: "jinaai/jina-embeddings-v2-base-code".to_string(),
+            model_file: "onnx/model.onnx".to_string(),
+            dimensions: 768,
+            max_seq_len: 8192,
+            description: "Jina Embeddings v2 Base Code - long-context code-optimized embeddings".to_string(),
+        }
+    }
+
+    /// Legacy model: BAAI/bge-small-en-v1.5
+    pub fn bge_small() -> Self {
         Self {
             repo_id: "BAAI/bge-small-en-v1.5".to_string(),
             model_file: "onnx/model.onnx".to_string(),

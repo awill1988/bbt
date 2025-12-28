@@ -22,15 +22,15 @@ pub fn default_config() -> BbtConfig {
         enable_section_detection: true,
         enable_header_footer_removal: true,
 
-        // Embedding
-        embedding_model_repo: "BAAI/bge-small-en-v1.5".to_string(),
+        // Embedding (jina-embeddings-v2-base-code: 768 dims, 8192 token context)
+        embedding_model_repo: "jinaai/jina-embeddings-v2-base-code".to_string(),
         embedding_model_file: "onnx/model.onnx".to_string(),
         embedding_batch_size: 32,
-        embedding_dims: 384,
+        embedding_dims: 768,
 
         // Retrieval
         retrieval_mode: RetrievalMode::Hybrid,
-        top_k: 20,
+        top_k: 5,
         min_score: 0.5,
         vector_weight: 0.5,
         bm25_weight: 0.5,
@@ -45,7 +45,7 @@ pub fn default_config() -> BbtConfig {
 
         // Vector store
         vector_store_type: VectorStoreType::Qdrant,
-        qdrant_url: "http://localhost:6333".to_string(),
+        qdrant_url: "http://localhost:6334".to_string(),
         qdrant_api_key: None,
         chromadb_url: "http://localhost:8000".to_string(),
         chromadb_collection: "bbt".to_string(),

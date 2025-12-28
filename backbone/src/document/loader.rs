@@ -39,6 +39,56 @@ impl DocumentFormat {
                 "go" | "mod" | "sum" => Some(Self::Text),
                 // python
                 "py" | "pyi" | "pyx" => Some(Self::Text),
+                // ruby
+                "rb" | "rake" | "gemspec" => Some(Self::Text),
+                // elixir
+                "ex" | "exs" => Some(Self::Text),
+                // erlang
+                "erl" | "hrl" => Some(Self::Text),
+                // clojure
+                "clj" | "cljs" | "cljc" | "edn" => Some(Self::Text),
+                // scala
+                "scala" | "sc" => Some(Self::Text),
+                // haskell
+                "hs" | "lhs" => Some(Self::Text),
+                // ocaml/reason
+                "ml" | "mli" | "re" | "rei" => Some(Self::Text),
+                // fsharp
+                "fs" | "fsi" | "fsx" => Some(Self::Text),
+                // julia
+                "jl" => Some(Self::Text),
+                // r
+                "r" | "R" | "Rmd" => Some(Self::Text),
+                // dart
+                "dart" => Some(Self::Text),
+                // perl
+                "pl" | "pm" | "perl" => Some(Self::Text),
+                // lua
+                "lua" => Some(Self::Text),
+                // vim
+                "vim" => Some(Self::Text),
+                // sql
+                "sql" => Some(Self::Text),
+                // graphql
+                "graphql" | "gql" => Some(Self::Text),
+                // protobuf
+                "proto" => Some(Self::Text),
+                // thrift
+                "thrift" => Some(Self::Text),
+                // solidity
+                "sol" => Some(Self::Text),
+                // move (blockchain)
+                "move" => Some(Self::Text),
+                // zig
+                "zig" => Some(Self::Text),
+                // v
+                "v" => Some(Self::Text),
+                // d
+                "d" => Some(Self::Text),
+                // nim
+                "nim" => Some(Self::Text),
+                // crystal
+                "cr" => Some(Self::Text),
                 // c/c++/clang
                 "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "inl" => Some(Self::Text),
                 // assembly (note: uppercase S is preprocessed assembly, but extension matching is case-insensitive)
@@ -306,16 +356,43 @@ impl DocumentLoader {
 
     /// Load a text file
     fn load_text<P: AsRef<Path>>(&self, path: P) -> Result<String> {
-        Ok(fs::read_to_string(path)?)
+        let path = path.as_ref();
+
+        // try to read as utf-8 first
+        match fs::read_to_string(path) {
+            Ok(content) => Ok(content),
+            Err(e) => {
+                // if utf-8 fails, try lossy conversion
+                tracing::debug!("utf-8 read failed for {:?}, trying lossy conversion: {}", path, e);
+                let bytes = fs::read(path)?;
+
+                // check if file is mostly binary (>10% null bytes)
+                let null_count = bytes.iter().filter(|&&b| b == 0).count();
+                let null_ratio = null_count as f32 / bytes.len() as f32;
+                if null_ratio > 0.1 {
+                    return Err(BbtError::Schema(format!(
+                        "file appears to be binary ({:.1}% null bytes)",
+                        null_ratio * 100.0
+                    )));
+                }
+
+                // use lossy utf-8 conversion (replaces invalid sequences with �)
+                let content = String::from_utf8_lossy(&bytes).into_owned();
+                tracing::debug!("loaded {:?} with lossy utf-8 conversion", path);
+                Ok(content)
+            }
+        }
     }
 
     /// Load a JSON file
     fn load_json<P: AsRef<Path>>(&self, path: P) -> Result<String> {
-        // For JSON, we read it as text and could optionally validate/format it
-        let content = fs::read_to_string(path)?;
+        let path = path.as_ref();
 
-        // Validate JSON using json5 parser (supports comments and trailing commas)
-        // This allows JSONC files (like VS Code configs) to be parsed
+        // read with same utf-8 handling as text files
+        let content = self.load_text(path)?;
+
+        // validate json using json5 parser (supports comments and trailing commas)
+        // this allows jsonc files (like vs code configs) to be parsed
         let _: serde_json::Value = json5::from_str(&content)
             .map_err(|e| BbtError::Schema(format!("invalid json/jsonc: {}", e)))?;
 

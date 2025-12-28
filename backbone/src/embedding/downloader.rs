@@ -20,14 +20,30 @@ pub fn ensure_onnx_model(
     let model_dir = cache_dir.join(&model_info.repo_id.replace('/', "_"));
     let model_path = model_dir.join(&model_info.model_file);
 
-    // if model already exists and is non-empty, return it
-    if model_path.exists() {
+    // tokenizer is always at the root of the repository
+    let tokenizer_file = "tokenizer.json".to_string();
+
+    // but we store it alongside the model file for convenience
+    let tokenizer_path = if model_info.model_file.contains('/') {
+        // if model is in subdirectory (e.g., onnx/model.onnx), put tokenizer there too
+        let model_parent = Path::new(&model_info.model_file)
+            .parent()
+            .map(|p| model_dir.join(p))
+            .unwrap_or(model_dir.clone());
+        model_parent.join(&tokenizer_file)
+    } else {
+        model_dir.join(&tokenizer_file)
+    };
+
+    // if both model and tokenizer exist and are non-empty, return model path
+    if model_path.exists() && tokenizer_path.exists() {
         if let Ok(metadata) = std::fs::metadata(&model_path) {
             if metadata.len() > 1000 {
                 // file is larger than 1kb, likely not a git-lfs pointer
                 tracing::info!(
-                    "using cached model at {}",
-                    model_path.display()
+                    "using cached model at {} (tokenizer: {})",
+                    model_path.display(),
+                    tokenizer_path.display()
                 );
                 return Ok(model_path);
             }
@@ -37,37 +53,71 @@ pub fn ensure_onnx_model(
     // create model directory if it doesn't exist
     std::fs::create_dir_all(&model_dir)?;
 
-    tracing::info!(
-        "downloading model {}/{} from huggingface",
-        model_info.repo_id,
-        model_info.model_file
-    );
-
-    // use hf-hub to download the model
+    // use hf-hub to download missing files
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| BbtError::ModelDownload(format!("failed to create hf-hub api: {}", e)))?;
 
     let repo = api.model(model_info.repo_id.clone());
 
-    let downloaded_path = repo.get(&model_info.model_file).map_err(|e| {
-        BbtError::ModelDownload(format!(
-            "failed to download {}/{}: {}",
-            model_info.repo_id, model_info.model_file, e
-        ))
-    })?;
+    // download model if missing
+    if !model_path.exists() {
+        tracing::info!(
+            "downloading model {}/{} from huggingface",
+            model_info.repo_id,
+            model_info.model_file
+        );
 
-    // create parent directory for model file (e.g., onnx/)
-    if let Some(parent) = model_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        let downloaded_path = repo.get(&model_info.model_file).map_err(|e| {
+            BbtError::ModelDownload(format!(
+                "failed to download {}/{}: {}",
+                model_info.repo_id, model_info.model_file, e
+            ))
+        })?;
+
+        // create parent directory for model file (e.g., onnx/)
+        if let Some(parent) = model_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // copy to our cache location for consistency
+        std::fs::copy(&downloaded_path, &model_path)?;
+
+        tracing::info!(
+            "model downloaded successfully to {}",
+            model_path.display()
+        );
     }
 
-    // copy to our cache location for consistency
-    std::fs::copy(&downloaded_path, &model_path)?;
+    // download tokenizer if missing
+    if !tokenizer_path.exists() {
+        tracing::info!(
+            "downloading tokenizer {}/{} from huggingface",
+            model_info.repo_id,
+            tokenizer_file
+        );
 
-    tracing::info!(
-        "model downloaded successfully to {}",
-        model_path.display()
-    );
+        // create parent directory for tokenizer
+        if let Some(parent) = tokenizer_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // create fresh repo reference for tokenizer download
+        let tokenizer_repo = api.model(model_info.repo_id.clone());
+
+        let downloaded_tokenizer = tokenizer_repo.get(&tokenizer_file).map_err(|e| {
+            BbtError::ModelDownload(format!(
+                "failed to download {}/{}: {}",
+                model_info.repo_id, tokenizer_file, e
+            ))
+        })?;
+
+        std::fs::copy(&downloaded_tokenizer, &tokenizer_path)?;
+
+        tracing::info!(
+            "tokenizer downloaded successfully to {}",
+            tokenizer_path.display()
+        );
+    }
 
     Ok(model_path)
 }

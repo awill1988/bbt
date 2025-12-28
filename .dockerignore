@@ -76,12 +76,17 @@ shell.nix
 Thumbs.db
 
 # python (if any)
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.tox/
 .coverage
 htmlcov/
+*.egg-info/
+.eggs/
 
 # node (if any)
 node_modules/

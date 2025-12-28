@@ -899,12 +899,19 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         }
 
         // process chunks in batches to avoid memory exhaustion
-        let chunk_batch_size = 4; // process 4 chunks at a time (small to prevent hang)
+        let chunk_batch_size = 1; // process 1 chunk at a time (minimal memory pressure)
         let mut all_points = Vec::new();
 
         for chunk_batch_start in (0..chunks.len()).step_by(chunk_batch_size) {
             let chunk_batch_end = (chunk_batch_start + chunk_batch_size).min(chunks.len());
             let chunk_batch = &chunks[chunk_batch_start..chunk_batch_end];
+
+            tracing::debug!(
+                "embedding chunk {}/{} for {:?}",
+                chunk_batch_start + 1,
+                chunks.len(),
+                file_path
+            );
 
             let embeddings = match embedder.embed(chunk_batch) {
                 Ok(em) => em,

@@ -60,6 +60,49 @@
           exec ${rustToolchain}/bin/cargo run --bin bbt -- "$@"
         '';
 
+        nuke-script = pkgs.writeShellScriptBin "nuke" ''
+          set -e
+
+          echo "🔥 NUKE: resetting all data..."
+          echo ""
+
+          # stop docker compose
+          if [ -f docker-compose.yml ]; then
+            echo "stopping docker compose services..."
+            ${pkgs.docker}/bin/docker compose down -v
+            echo "✓ docker services stopped and volumes removed"
+          fi
+
+          # clear local data directories
+          if [ -d ./data ]; then
+            echo "clearing ./data directory..."
+            rm -rf ./data/*
+            echo "✓ local data cleared"
+          fi
+
+          # clear cache (optional, preserves models)
+          if [ "$1" = "--clear-cache" ]; then
+            echo "clearing ./cache directory..."
+            rm -rf ./.cache/*
+            echo "✓ cache cleared"
+          else
+            echo "ℹ  cache preserved (use --clear-cache to remove models)"
+          fi
+
+          # recreate directories
+          mkdir -p .cache data
+
+          echo ""
+          echo "✅ nuke complete! all data reset"
+          echo ""
+          echo "to restart services:"
+          echo "  docker compose up -d"
+          echo ""
+          echo "to re-index:"
+          echo "  bbt sync <paths>"
+          echo "  bbt sync --commits <paths>"
+        '';
+
       in {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; ([
@@ -81,6 +124,7 @@
             pkgs.docker
             docker-build-script
             bbt-script
+            nuke-script
           ];
 
           shellHook = ''
@@ -92,7 +136,7 @@
             export BBT_QDRANT_URL="''${BBT_QDRANT_URL:-http://localhost:6334}"
             export BBT_STATE_STORE_PATH="''${BBT_STATE_STORE_PATH:-./data/state.db}"
             export BBT_RETRIEVAL_MODE="''${BBT_RETRIEVAL_MODE:-hybrid}"
-            export BBT_TOP_K="''${BBT_TOP_K:-20}"
+            export BBT_TOP_K="''${BBT_TOP_K:-5}"
             export BBT_VECTOR_WEIGHT="''${BBT_VECTOR_WEIGHT:-0.5}"
             export BBT_BM25_WEIGHT="''${BBT_BM25_WEIGHT:-0.5}"
             export BBT_MIN_SCORE="''${BBT_MIN_SCORE:-0.5}"
@@ -119,6 +163,10 @@
           docker-build = {
             type = "app";
             program = "${docker-build-script}/bin/docker-build";
+          };
+          nuke = {
+            type = "app";
+            program = "${nuke-script}/bin/nuke";
           };
         };
       });

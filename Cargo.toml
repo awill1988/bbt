@@ -100,3 +100,6 @@ dirs = "5.0"
 
 # Testing
 tempfile = "3.23"
+
+# Git
+git2 = "0.18"

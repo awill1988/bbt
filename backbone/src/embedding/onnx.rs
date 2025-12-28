@@ -79,12 +79,12 @@ impl OnnxEmbedder {
             )));
         }
 
-        // load onnx session with limited threading to prevent deadlocks
+        // load onnx session with single-threaded execution to prevent deadlocks and hangs
         let session = Session::builder()
             .map_err(|e| BbtError::Model(format!("failed to create session builder: {}", e)))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?
-            .with_intra_threads(2)
+            .with_intra_threads(1)
             .map_err(|e| BbtError::Model(format!("failed to set intra threads: {}", e)))?
             .with_inter_threads(1)
             .map_err(|e| BbtError::Model(format!("failed to set inter threads: {}", e)))?

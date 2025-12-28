@@ -899,7 +899,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         }
 
         // process chunks in batches to avoid memory exhaustion
-        let chunk_batch_size = 32; // process 32 chunks at a time
+        let chunk_batch_size = 4; // process 4 chunks at a time (small to prevent hang)
         let mut all_points = Vec::new();
 
         for chunk_batch_start in (0..chunks.len()).step_by(chunk_batch_size) {

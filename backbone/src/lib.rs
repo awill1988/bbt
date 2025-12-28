@@ -10,5 +10,6 @@ pub mod storage;
 pub mod embedding;
 pub mod reranking;
 pub mod retrieval;
+pub mod git;
 
 pub use error::{BbtError, Result};

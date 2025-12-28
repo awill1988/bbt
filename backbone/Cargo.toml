@@ -32,6 +32,7 @@ uuid = { workspace = true }
 walkdir = { workspace = true }
 lru = { workspace = true }
 ort = { workspace = true }
+tokenizers = { workspace = true }
 
 # PDF processing
 pdfium-render = { workspace = true, optional = true }
@@ -54,6 +55,9 @@ tracing = { workspace = true }
 tracing-core = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+
+# Git
+git2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

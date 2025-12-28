@@ -271,6 +271,7 @@ pub struct ChunkMetadata {
 
 /// Document loader for multiple formats
 pub struct DocumentLoader {
+    max_file_size_bytes: u64,
     #[cfg(feature = "pdf")]
     pdf_extractor: Option<PdfExtractor>,
 }
@@ -278,7 +279,13 @@ pub struct DocumentLoader {
 impl DocumentLoader {
     /// Create a new document loader
     pub fn new() -> Result<Self> {
+        Self::with_max_size(10_485_760) // 10 MiB default
+    }
+
+    /// Create a new document loader with custom max file size
+    pub fn with_max_size(max_file_size_bytes: u64) -> Result<Self> {
         Ok(Self {
+            max_file_size_bytes,
             #[cfg(feature = "pdf")]
             pdf_extractor: PdfExtractor::new().ok(),
         })
@@ -303,6 +310,17 @@ impl DocumentLoader {
         // Get file metadata
         let file_metadata = fs::metadata(path)?;
         let size_bytes = file_metadata.len();
+
+        // Check file size limit
+        if size_bytes > self.max_file_size_bytes {
+            return Err(BbtError::Schema(format!(
+                "file too large: {} bytes (max: {} bytes, {:.1} MiB)",
+                size_bytes,
+                self.max_file_size_bytes,
+                self.max_file_size_bytes as f64 / 1_048_576.0
+            )));
+        }
+
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())

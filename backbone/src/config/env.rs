@@ -23,6 +23,7 @@ pub fn from_env() -> Result<BbtConfig> {
         // Document processing
         chunk_size: get_env_parse_or("BBT_CHUNK_SIZE", defaults.chunk_size)?,
         chunk_overlap: get_env_parse_or("BBT_CHUNK_OVERLAP", defaults.chunk_overlap)?,
+        max_file_size_bytes: get_env_parse_or("BBT_MAX_FILE_SIZE_BYTES", defaults.max_file_size_bytes)?,
         enable_ocr: get_env_bool_or("BBT_ENABLE_OCR", defaults.enable_ocr)?,
         enable_section_detection: get_env_bool_or(
             "BBT_ENABLE_SECTION_DETECTION",

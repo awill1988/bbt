@@ -409,7 +409,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     eprintln!("debug: config loaded");
 
     eprintln!("debug: creating document loader");
-    let loader = DocumentLoader::new()?;
+    let loader = DocumentLoader::with_max_size(config.max_file_size_bytes)?;
     eprintln!("debug: loader created");
     let state_path = config.state_store_path.clone();
     eprintln!("debug: checking reset_state flag");

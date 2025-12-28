@@ -23,6 +23,7 @@ pub struct BbtConfig {
     // Document processing
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+    pub max_file_size_bytes: u64,
     pub enable_ocr: bool,
     pub enable_section_detection: bool,
     pub enable_header_footer_removal: bool,

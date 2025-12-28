@@ -18,6 +18,7 @@ pub fn default_config() -> BbtConfig {
         // Document processing
         chunk_size: 512,
         chunk_overlap: 128,
+        max_file_size_bytes: 10_485_760, // 10 MiB
         enable_ocr: false,
         enable_section_detection: true,
         enable_header_footer_removal: true,

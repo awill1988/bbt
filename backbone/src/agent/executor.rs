@@ -79,6 +79,7 @@ impl Clone for BbtError {
                 e.to_string(),
             ))),
             BbtError::Model(s) => BbtError::Model(s.clone()),
+            BbtError::Embedding(s) => BbtError::Embedding(s.clone()),
             BbtError::Schema(s) => BbtError::Schema(s.clone()),
             BbtError::DdlExtraction(s) => BbtError::DdlExtraction(s.clone()),
             BbtError::ModelDownload(s) => BbtError::ModelDownload(s.clone()),

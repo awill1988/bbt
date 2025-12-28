@@ -2,8 +2,21 @@ use super::{BbtConfig, RetrievalMode, VectorStoreType};
 use crate::config::feature_flags::FeatureFlags;
 use std::path::PathBuf;
 
+fn default_embedding_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+}
+
+fn default_embedding_queue_size(embedding_workers: usize) -> usize {
+    embedding_workers.saturating_mul(4).max(1)
+}
+
 /// Default configuration values
 pub fn default_config() -> BbtConfig {
+    let embedding_workers = default_embedding_workers();
+    let embedding_queue_size = default_embedding_queue_size(embedding_workers);
+
     BbtConfig {
         // General
         log_level: "info".to_string(),
@@ -27,6 +40,8 @@ pub fn default_config() -> BbtConfig {
         embedding_model_repo: "jinaai/jina-embeddings-v2-base-code".to_string(),
         embedding_model_file: "onnx/model.onnx".to_string(),
         embedding_batch_size: 32,
+        embedding_workers,
+        embedding_queue_size,
         embedding_dims: 768,
 
         // Retrieval

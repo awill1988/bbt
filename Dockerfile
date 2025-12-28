@@ -79,6 +79,9 @@ RUN rm -rf target/release/.fingerprint/bbt-* target/release/.fingerprint/backbon
 # =============================================================================
 FROM deps AS builder
 
+# reuse gpu flag for feature selection
+ARG ENABLE_GPU=false
+
 # remove dummy files
 RUN rm -rf backbone/src bbt/src
 
@@ -90,7 +93,11 @@ COPY bbt ./bbt
 ARG RUSTFLAGS="-C target-cpu=native -C opt-level=3"
 ENV RUSTFLAGS=${RUSTFLAGS}
 
-RUN cargo build --release --locked --bin bbt
+RUN if [ "$ENABLE_GPU" = "true" ]; then \
+        cargo build --release --locked --bin bbt --features cuda; \
+    else \
+        cargo build --release --locked --bin bbt; \
+    fi
 
 # strip debug symbols to reduce binary size
 RUN strip target/release/bbt

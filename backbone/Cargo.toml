@@ -7,6 +7,8 @@ edition = "2021"
 default = ["pdf"]
 pdf = ["dep:pdfium-render", "dep:lopdf"]
 ocr = ["dep:tesseract"]
+cuda = ["ort/cuda"]
+coreml = ["ort/coreml"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -33,6 +35,7 @@ walkdir = { workspace = true }
 lru = { workspace = true }
 ort = { workspace = true }
 tokenizers = { workspace = true }
+rayon = { workspace = true }
 
 # PDF processing
 pdfium-render = { workspace = true, optional = true }

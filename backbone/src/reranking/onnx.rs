@@ -1,35 +1,60 @@
 use crate::error::{BbtError, Result};
 use crate::reranking::models::RerankModelInfo;
+use ort::execution_providers::{
+    CoreMLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider,
+    ExecutionProvider as OrtExecutionProvider,
+};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use std::env;
 use std::path::Path;
 
 /// execution provider for onnx runtime
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionProvider {
     Cpu,
+    Coreml,
     Cuda,
 }
 
 impl ExecutionProvider {
     /// detect best available execution provider
     pub fn detect() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            // metal support would go here if available
-            ExecutionProvider::Cpu
+        if is_force_cpu() {
+            tracing::info!("gpu acceleration disabled (cpu mode forced)");
+            return ExecutionProvider::Cpu;
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_vendor = "apple")]
         {
-            // try cuda, fallback to cpu
-            if ort::CUDAExecutionProvider::default().is_available() {
-                ExecutionProvider::Cuda
-            } else {
-                ExecutionProvider::Cpu
+            if cfg!(feature = "coreml")
+                && CoreMLExecutionProvider::default()
+                    .is_available()
+                    .unwrap_or(false)
+            {
+                return ExecutionProvider::Coreml;
             }
         }
+
+        if cfg!(feature = "cuda")
+            && CUDAExecutionProvider::default()
+                .is_available()
+                .unwrap_or(false)
+        {
+            ExecutionProvider::Cuda
+        } else {
+            ExecutionProvider::Cpu
+        }
     }
+}
+
+fn is_force_cpu() -> bool {
+    env::var("BBT_FORCE_CPU")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
 }
 
 /// onnx-based cross-encoder reranker
@@ -46,16 +71,42 @@ impl OnnxReranker {
     /// # arguments
     /// * `model_path` - path to onnx model file
     /// * `model_info` - model metadata
-    /// * `provider` - execution provider (cpu/cuda)
+    /// * `provider` - execution provider (cpu/coreml/cuda)
     pub fn new(
         model_path: &Path,
         model_info: RerankModelInfo,
         provider: ExecutionProvider,
     ) -> Result<Self> {
-        let session = Session::builder()
+        let session_builder = Session::builder()
             .map_err(|e| BbtError::Model(format!("failed to create session builder: {}", e)))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?
+            .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?;
+
+        let session_builder = match provider {
+            ExecutionProvider::Cuda => session_builder
+                .with_execution_providers([
+                    CUDAExecutionProvider::default().build(),
+                    CPUExecutionProvider::default().build(),
+                ])
+                .map_err(|e| {
+                    BbtError::Model(format!("failed to set execution providers: {}", e))
+                })?,
+            ExecutionProvider::Coreml => session_builder
+                .with_execution_providers([
+                    CoreMLExecutionProvider::default().build(),
+                    CPUExecutionProvider::default().build(),
+                ])
+                .map_err(|e| {
+                    BbtError::Model(format!("failed to set execution providers: {}", e))
+                })?,
+            ExecutionProvider::Cpu => session_builder
+                .with_execution_providers([CPUExecutionProvider::default().build()])
+                .map_err(|e| {
+                    BbtError::Model(format!("failed to set execution providers: {}", e))
+                })?,
+        };
+
+        let session = session_builder
             .commit_from_file(model_path)
             .map_err(|e| BbtError::Model(format!("failed to load model from {:?}: {}", model_path, e)))?;
 
@@ -151,7 +202,10 @@ mod tests {
     #[test]
     fn test_execution_provider_detection() {
         let provider = ExecutionProvider::detect();
-        // should return either cpu or cuda
-        assert!(provider == ExecutionProvider::Cpu || provider == ExecutionProvider::Cuda);
+        // should return a supported provider
+        assert!(matches!(
+            provider,
+            ExecutionProvider::Cpu | ExecutionProvider::Coreml | ExecutionProvider::Cuda
+        ));
     }
 }

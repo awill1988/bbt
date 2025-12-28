@@ -41,6 +41,14 @@ pub fn from_env() -> Result<BbtConfig> {
             "BBT_EMBEDDING_BATCH_SIZE",
             defaults.embedding_batch_size,
         )?,
+        embedding_workers: get_env_parse_or(
+            "BBT_EMBEDDING_WORKERS",
+            defaults.embedding_workers,
+        )?,
+        embedding_queue_size: get_env_parse_or(
+            "BBT_EMBEDDING_QUEUE_SIZE",
+            defaults.embedding_queue_size,
+        )?,
         embedding_dims: get_env_parse_or("BBT_EMBEDDING_DIMS", defaults.embedding_dims)?,
 
         // Retrieval

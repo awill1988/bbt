@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -30,6 +31,21 @@ struct QueryResultOutput {
     citation: String,
     source: String,
     metadata: std::collections::HashMap<String, String>,
+}
+
+struct EmbeddingTask {
+    file_path: PathBuf,
+    source_path: String,
+    display_name: String,
+    file_size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    file_hash: String,
+    chunks: Vec<String>,
+}
+
+struct EmbeddingResult {
+    task: EmbeddingTask,
+    embeddings: std::result::Result<Vec<Vec<f32>>, String>,
 }
 
 #[derive(Args)]
@@ -388,6 +404,235 @@ fn expand_extensions(ext_list: &[String]) -> Vec<String> {
     extensions
 }
 
+fn embed_chunks(
+    embedder: &mut backbone::embedding::OnnxEmbedder,
+    chunks: &[String],
+    batch_size: usize,
+) -> std::result::Result<Vec<Vec<f32>>, String> {
+    if chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let batch_size = batch_size.max(1);
+    let mut all_embeddings = Vec::with_capacity(chunks.len());
+
+    for chunk_batch_start in (0..chunks.len()).step_by(batch_size) {
+        let chunk_batch_end = (chunk_batch_start + batch_size).min(chunks.len());
+        let chunk_batch = &chunks[chunk_batch_start..chunk_batch_end];
+
+        tracing::debug!(
+            "embedding chunk batch [{}-{})",
+            chunk_batch_start,
+            chunk_batch_end
+        );
+
+        let embeddings = embedder
+            .embed(chunk_batch)
+            .map_err(|e| format!("embedding failed: {e}"))?;
+
+        if embeddings.len() != chunk_batch.len() {
+            return Err(format!(
+                "embedding count mismatch: chunks={}, embeddings={}",
+                chunk_batch.len(),
+                embeddings.len()
+            ));
+        }
+
+        all_embeddings.extend(embeddings);
+    }
+
+    Ok(all_embeddings)
+}
+
+async fn process_embedding_result(
+    result: EmbeddingResult,
+    qdrant_client: &qdrant_client::Qdrant,
+    collection_name: &str,
+    bm25_index: &mut backbone::retrieval::bm25::Bm25Index,
+    state_store: &mut backbone::storage::StateStore,
+    files_bar: &indicatif::ProgressBar,
+    bytes_bar: &indicatif::ProgressBar,
+    files_message_width: usize,
+    bytes_message_width: usize,
+) -> Result<()> {
+    use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder, Value};
+    use uuid::Uuid;
+
+    let EmbeddingResult { task, embeddings } = result;
+    let EmbeddingTask {
+        file_path,
+        source_path,
+        display_name,
+        file_size_bytes,
+        modified_at,
+        file_hash,
+        chunks,
+    } = task;
+
+    let embeddings = match embeddings {
+        Ok(embeddings) => embeddings,
+        Err(err) => {
+            tracing::error!("embedding failed for {:?}: {}", file_path, err);
+            let _ = state_store.record_failure(
+                &source_path,
+                Some(file_hash),
+                file_size_bytes,
+                modified_at,
+                format!("embedding failed: {err}"),
+            );
+            let _ = state_store.mark_failed(&source_path, err);
+            let files_message = right_align_truncate(&display_name, files_message_width);
+            let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+            files_bar.set_message(files_message);
+            bytes_bar.set_message(bytes_message);
+            files_bar.inc(1);
+            bytes_bar.inc(file_size_bytes);
+            return Ok(());
+        }
+    };
+
+    if embeddings.len() != chunks.len() {
+        tracing::error!(
+            "embedding count mismatch for {:?}: chunks={}, embeddings={}",
+            file_path,
+            chunks.len(),
+            embeddings.len()
+        );
+        let _ = state_store.record_failure(
+            &source_path,
+            Some(file_hash),
+            file_size_bytes,
+            modified_at,
+            "embedding count mismatch".to_string(),
+        );
+        let _ = state_store.mark_failed(&source_path, "embedding count mismatch".to_string());
+        let files_message = right_align_truncate(&display_name, files_message_width);
+        let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+        files_bar.set_message(files_message);
+        bytes_bar.set_message(bytes_message);
+        files_bar.inc(1);
+        bytes_bar.inc(file_size_bytes);
+        return Ok(());
+    }
+
+    let mut all_points = Vec::with_capacity(chunks.len());
+    for (chunk_text, embedding) in chunks.iter().zip(embeddings.into_iter()) {
+        let chunk_id = Uuid::new_v4().to_string();
+        let mut payload: HashMap<String, Value> = HashMap::new();
+        payload.insert("text".to_string(), chunk_text.clone().into());
+        payload.insert(
+            "source".to_string(),
+            file_path.to_string_lossy().to_string().into(),
+        );
+
+        let point = PointStruct::new(chunk_id.clone(), embedding, payload);
+        all_points.push(point);
+
+        let _ = bm25_index.add_document(&chunk_id, chunk_text);
+    }
+
+    tracing::debug!("created {} points for {:?}", all_points.len(), file_path);
+
+    let mut retry_count = 0;
+    let max_retries = 3;
+    let mut success = false;
+
+    while retry_count <= max_retries && !success {
+        let upsert_request =
+            UpsertPointsBuilder::new(collection_name.to_string(), all_points.clone()).build();
+        match qdrant_client.upsert_points(upsert_request).await {
+            Ok(_) => {
+                tracing::debug!("successfully ingested file {:?}", file_path);
+                let _ = state_store.mark_complete(&source_path, all_points.len());
+                let _ = state_store.clear_failure(&source_path);
+                let files_message = right_align_truncate(&display_name, files_message_width);
+                let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                files_bar.set_message(files_message);
+                bytes_bar.set_message(bytes_message);
+                files_bar.inc(1);
+                bytes_bar.inc(file_size_bytes);
+                success = true;
+            }
+            Err(e) => {
+                if retry_count < max_retries {
+                    let delay_ms = 100 * (2_u64.pow(retry_count));
+                    tracing::warn!(
+                        "upsert failed for {:?} (attempt {}/{}), retrying in {}ms: {}",
+                        file_path,
+                        retry_count + 1,
+                        max_retries + 1,
+                        delay_ms,
+                        e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    retry_count += 1;
+                } else {
+                    tracing::error!(
+                        "failed to upsert points for {:?} after {} attempts: {}",
+                        file_path,
+                        max_retries + 1,
+                        e
+                    );
+                    let _ = state_store.record_failure(
+                        &source_path,
+                        Some(file_hash.clone()),
+                        file_size_bytes,
+                        modified_at,
+                        format!("upsert failed: {e}"),
+                    );
+                    let _ = state_store.mark_failed(&source_path, e.to_string());
+                    let files_message = right_align_truncate(&display_name, files_message_width);
+                    let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                    files_bar.set_message(files_message);
+                    bytes_bar.set_message(bytes_message);
+                    files_bar.inc(1);
+                    bytes_bar.inc(file_size_bytes);
+                    retry_count += 1;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn drain_embedding_results(
+    result_rx: &std::sync::mpsc::Receiver<EmbeddingResult>,
+    pending_tasks: &mut usize,
+    qdrant_client: &qdrant_client::Qdrant,
+    collection_name: &str,
+    bm25_index: &mut backbone::retrieval::bm25::Bm25Index,
+    state_store: &mut backbone::storage::StateStore,
+    files_bar: &indicatif::ProgressBar,
+    bytes_bar: &indicatif::ProgressBar,
+    files_message_width: usize,
+    bytes_message_width: usize,
+) -> Result<()> {
+    loop {
+        match result_rx.try_recv() {
+            Ok(result) => {
+                *pending_tasks = pending_tasks.saturating_sub(1);
+                process_embedding_result(
+                    result,
+                    qdrant_client,
+                    collection_name,
+                    bm25_index,
+                    state_store,
+                    files_bar,
+                    bytes_bar,
+                    files_message_width,
+                    bytes_message_width,
+                )
+                .await?;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+
+    Ok(())
+}
+
 async fn sync_documents(args: SyncCommand) -> Result<()> {
     use backbone::config::BbtConfig;
     use backbone::document::loader::DocumentLoader;
@@ -399,10 +644,9 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
     use console::Term;
     use qdrant_client::Qdrant;
-    use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder, Value};
     use std::fs;
-    use std::collections::HashMap;
-    use uuid::Uuid;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
 
     eprintln!("debug: loading config");
     let config = BbtConfig::from_env()?;
@@ -723,9 +967,74 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     eprintln!("debug: ensuring onnx model is downloaded");
     let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
     eprintln!("debug: model path: {:?}", model_path);
-    eprintln!("debug: creating embedder");
-    let mut embedder = OnnxEmbedder::new(&model_path, model_info, ExecutionProvider::detect())?;
-    eprintln!("debug: embedder created");
+    let embedding_provider = ExecutionProvider::detect();
+    eprintln!("debug: embedding provider: {}", embedding_provider.as_str());
+    let embedding_workers = config.embedding_workers.max(1);
+    let embedding_queue_size = config.embedding_queue_size.max(embedding_workers);
+    let embedding_batch_size = config.embedding_batch_size.max(1);
+    tracing::info!(
+        "embedding workers={}, queue_size={}, batch_size={}",
+        embedding_workers,
+        embedding_queue_size,
+        embedding_batch_size
+    );
+
+    let (task_tx, task_rx) = mpsc::sync_channel::<EmbeddingTask>(embedding_queue_size);
+    let (result_tx, result_rx) = mpsc::sync_channel::<EmbeddingResult>(embedding_queue_size);
+    let task_rx = Arc::new(Mutex::new(task_rx));
+    let mut worker_handles = Vec::new();
+
+    for worker_id in 0..embedding_workers {
+        let task_rx = Arc::clone(&task_rx);
+        let result_tx = result_tx.clone();
+        let model_path = model_path.clone();
+        let model_info = model_info.clone();
+        let embedding_provider = embedding_provider;
+        let worker_batch_size = embedding_batch_size;
+
+        let handle = thread::Builder::new()
+            .name(format!("embedding_worker_{}", worker_id))
+            .spawn(move || {
+                let mut embedder = match OnnxEmbedder::new(&model_path, model_info, embedding_provider) {
+                    Ok(embedder) => Some(embedder),
+                    Err(err) => {
+                        tracing::error!("failed to initialize embedder: {}", err);
+                        None
+                    }
+                };
+
+                loop {
+                    let task = {
+                        let receiver = task_rx.lock().expect("task_rx lock poisoned");
+                        receiver.recv()
+                    };
+
+                    let task = match task {
+                        Ok(task) => task,
+                        Err(_) => break,
+                    };
+
+                    let embeddings = if let Some(ref mut embedder) = embedder {
+                        embed_chunks(embedder, &task.chunks, worker_batch_size)
+                    } else {
+                        Err("embedder initialization failed".to_string())
+                    };
+
+                    if result_tx
+                        .send(EmbeddingResult {
+                            task,
+                            embeddings,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+        worker_handles.push(handle);
+    }
+
+    drop(result_tx);
 
     // load or create bm25 index
     eprintln!("debug: loading bm25 index");
@@ -790,7 +1099,23 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     );
     eprintln!("debug: starting main sync loop");
 
-    'file_loop: for candidate in candidates {
+    let mut pending_tasks = 0usize;
+
+    for candidate in candidates {
+        drain_embedding_results(
+            &result_rx,
+            &mut pending_tasks,
+            &qdrant_client,
+            &collection_name,
+            &mut bm25_index,
+            &mut state_store,
+            &files_bar,
+            &bytes_bar,
+            files_message_width,
+            bytes_message_width,
+        )
+        .await?;
+
         let filename = candidate
             .path
             .file_name()
@@ -898,145 +1223,84 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             continue;
         }
 
-        // process chunks in batches to avoid memory exhaustion
-        let chunk_batch_size = 1; // process 1 chunk at a time (minimal memory pressure)
-        let mut all_points = Vec::new();
+        let mut task = EmbeddingTask {
+            file_path: file_path.to_path_buf(),
+            source_path: source_path.clone(),
+            display_name: display_name.clone(),
+            file_size_bytes,
+            modified_at,
+            file_hash: doc.file_hash.clone(),
+            chunks,
+        };
 
-        for chunk_batch_start in (0..chunks.len()).step_by(chunk_batch_size) {
-            let chunk_batch_end = (chunk_batch_start + chunk_batch_size).min(chunks.len());
-            let chunk_batch = &chunks[chunk_batch_start..chunk_batch_end];
-
-            tracing::debug!(
-                "embedding chunk {}/{} for {:?}",
-                chunk_batch_start + 1,
-                chunks.len(),
-                file_path
-            );
-
-            let embeddings = match embedder.embed(chunk_batch) {
-                Ok(em) => em,
-                Err(e) => {
-                    tracing::error!(
-                        "failed to embed chunk batch [{}-{}) for {:?}: {}",
-                        chunk_batch_start,
-                        chunk_batch_end,
-                        file_path,
-                        e
-                    );
-                    let _ = state_store.record_failure(
-                        &source_path,
-                        Some(doc.file_hash.clone()),
-                        file_size_bytes,
-                        modified_at,
-                        format!("embedding failed: {e}"),
-                    );
-                    let _ = state_store.mark_failed(&source_path, e.to_string());
-                    let files_message = right_align_truncate(&display_name, files_message_width);
-                    let bytes_message = right_align_truncate(&display_name, bytes_message_width);
-                    files_bar.set_message(files_message);
-                    bytes_bar.set_message(bytes_message);
-                    files_bar.inc(1);
-                    bytes_bar.inc(candidate.size_bytes);
-                    continue 'file_loop;
+        loop {
+            match task_tx.try_send(task) {
+                Ok(()) => {
+                    pending_tasks += 1;
+                    break;
                 }
-            };
-
-            if embeddings.len() != chunk_batch.len() {
-                tracing::error!(
-                    "embedding count mismatch for {:?} batch [{}-{}): chunks={}, embeddings={}",
-                    file_path,
-                    chunk_batch_start,
-                    chunk_batch_end,
-                    chunk_batch.len(),
-                    embeddings.len()
-                );
-                continue 'file_loop;
-            }
-
-            // create points for this batch
-            for (chunk_text, embedding) in chunk_batch.iter().zip(embeddings.into_iter()) {
-                let chunk_id = Uuid::new_v4().to_string();
-                let mut payload: HashMap<String, Value> = HashMap::new();
-                payload.insert("text".to_string(), chunk_text.clone().into());
-                payload.insert(
-                    "source".to_string(),
-                    file_path.to_string_lossy().to_string().into(),
-                );
-
-                let point = PointStruct::new(chunk_id.clone(), embedding, payload);
-                all_points.push(point);
-
-                // add to bm25 index
-                let _ = bm25_index.add_document(&chunk_id, chunk_text);
-            }
-        }
-
-        tracing::debug!(
-            "created {} points for {:?}",
-            all_points.len(),
-            file_path
-        );
-
-        // retry upsert with exponential backoff
-        let mut retry_count = 0;
-        let max_retries = 3;
-        let mut success = false;
-
-        while retry_count <= max_retries && !success {
-            let upsert_request =
-                UpsertPointsBuilder::new(collection_name.clone(), all_points.clone()).build();
-            match qdrant_client.upsert_points(upsert_request).await {
-                Ok(_) => {
-                    tracing::debug!("successfully ingested file {:?}", file_path);
-                    let _ = state_store.mark_complete(&source_path, all_points.len());
-                    let _ = state_store.clear_failure(&source_path);
-                    let files_message = right_align_truncate(&display_name, files_message_width);
-                    let bytes_message = right_align_truncate(&display_name, bytes_message_width);
-                    files_bar.set_message(files_message);
-                    bytes_bar.set_message(bytes_message);
-                    files_bar.inc(1);
-                    bytes_bar.inc(candidate.size_bytes);
-                    success = true;
+                Err(mpsc::TrySendError::Full(returned_task)) => {
+                    task = returned_task;
+                    drain_embedding_results(
+                        &result_rx,
+                        &mut pending_tasks,
+                        &qdrant_client,
+                        &collection_name,
+                        &mut bm25_index,
+                        &mut state_store,
+                        &files_bar,
+                        &bytes_bar,
+                        files_message_width,
+                        bytes_message_width,
+                    )
+                    .await?;
                 }
-                Err(e) => {
-                    if retry_count < max_retries {
-                        let delay_ms = 100 * (2_u64.pow(retry_count));
-                        tracing::warn!(
-                            "upsert failed for {:?} (attempt {}/{}), retrying in {}ms: {}",
-                            file_path,
-                            retry_count + 1,
-                            max_retries + 1,
-                            delay_ms,
-                            e
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                        retry_count += 1;
-                    } else {
-                        tracing::error!(
-                            "failed to upsert points for {:?} after {} attempts: {}",
-                            file_path,
-                            max_retries + 1,
-                            e
-                        );
-                        let _ = state_store.record_failure(
-                            &source_path,
-                            Some(doc.file_hash.clone()),
-                            file_size_bytes,
-                            modified_at,
-                            format!("upsert failed: {e}"),
-                        );
-                        let _ = state_store.mark_failed(&source_path, e.to_string());
-                        let files_message = right_align_truncate(&display_name, files_message_width);
-                        let bytes_message = right_align_truncate(&display_name, bytes_message_width);
-                        files_bar.set_message(files_message);
-                        bytes_bar.set_message(bytes_message);
-                        files_bar.inc(1);
-                        bytes_bar.inc(candidate.size_bytes);
-                        retry_count += 1;
-                    }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(anyhow!("embedding worker channel closed"));
                 }
             }
         }
+
+        drain_embedding_results(
+            &result_rx,
+            &mut pending_tasks,
+            &qdrant_client,
+            &collection_name,
+            &mut bm25_index,
+            &mut state_store,
+            &files_bar,
+            &bytes_bar,
+            files_message_width,
+            bytes_message_width,
+        )
+        .await?;
+    }
+
+    drop(task_tx);
+
+    while pending_tasks > 0 {
+        match result_rx.recv() {
+            Ok(result) => {
+                pending_tasks = pending_tasks.saturating_sub(1);
+                process_embedding_result(
+                    result,
+                    &qdrant_client,
+                    &collection_name,
+                    &mut bm25_index,
+                    &mut state_store,
+                    &files_bar,
+                    &bytes_bar,
+                    files_message_width,
+                    bytes_message_width,
+                )
+                .await?;
+            }
+            Err(_) => break,
+        }
+    }
+
+    for handle in worker_handles {
+        let _ = handle.join();
     }
 
     files_bar.finish_with_message("done");
@@ -1055,7 +1319,9 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     if args.commits {
         eprintln!("debug: starting commit indexing");
         tracing::info!("indexing git commits");
-        if let Err(e) = sync_commits(&args, &config, &qdrant_client, &mut embedder).await {
+        let mut commit_embedder =
+            OnnxEmbedder::new(&model_path, model_info.clone(), embedding_provider)?;
+        if let Err(e) = sync_commits(&args, &config, &qdrant_client, &mut commit_embedder).await {
             tracing::error!("failed to index commits: {}", e);
         }
         eprintln!("debug: commit indexing complete");

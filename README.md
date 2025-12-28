@@ -42,15 +42,20 @@ cargo build --release --locked
 ./target/release/bbt --help
 ```
 
-**macOS with Metal GPU** (4-6x faster than CPU):
+**Linux with NVIDIA GPU**:
 ```bash
-# metal only works natively, not in docker
-brew install pdfium tesseract
-cargo build --release --locked
+cargo build --release --locked --features cuda
+```
 
-# verify metal detection
+**macOS with CoreML GPU** (4-6x faster than CPU):
+```bash
+# coreml only works natively, not in docker
+brew install pdfium tesseract
+cargo build --release --locked --features coreml
+
+# verify coreml detection
 LOG_LEVEL=info ./target/release/bbt serve
-# should show: [INFO] detected execution provider: Metal
+# should show: provider=coreml
 
 # force cpu if needed
 export BBT_FORCE_CPU=1
@@ -116,6 +121,8 @@ BBT_CHUNK_OVERLAP=128
 # embedding
 BBT_EMBEDDING_MODEL_REPO=BAAI/bge-small-en-v1.5
 BBT_EMBEDDING_BATCH_SIZE=32
+BBT_EMBEDDING_WORKERS=8
+BBT_EMBEDDING_QUEUE_SIZE=32
 
 # retrieval
 BBT_RETRIEVAL_MODE=hybrid
@@ -196,7 +203,7 @@ bbt/           - cli binary (ingest, query, serve, gen)
 backbone/      - core library
   ├── config/      - configuration
   ├── document/    - pdf/text processing, chunking
-  ├── embedding/   - onnx embedding (metal/cuda/cpu)
+  ├── embedding/   - onnx embedding (coreml/cuda/cpu)
   ├── storage/     - state tracking, metadata
   ├── agent/       - llm agents
   ├── dag/         - task orchestration
@@ -206,19 +213,19 @@ backbone/      - core library
 ## GPU Support
 
 **Auto-detected** for embedding generation:
-- **macOS (M1/M2/M3)**: Metal backend (native build only, not docker)
+- **macOS (M1/M2/M3)**: CoreML backend (native build only, not docker)
 - **Linux + NVIDIA**: CUDA backend (requires nvidia-docker)
 - **Other**: CPU fallback
 
 **Performance (embedding generation)**:
 | Platform | Backend | Throughput | Speedup |
 |----------|---------|------------|---------|
-| M1 Pro | Metal | ~800 chunks/sec | 5x |
-| M2 Max | Metal | ~1200 chunks/sec | 5x |
-| M3 Max | Metal | ~1500 chunks/sec | 5x |
+| M1 Pro | CoreML | ~800 chunks/sec | 5x |
+| M2 Max | CoreML | ~1200 chunks/sec | 5x |
+| M3 Max | CoreML | ~1500 chunks/sec | 5x |
 | RTX 3090 | CUDA | ~2000 chunks/sec | 8x |
 
-**Note**: Docker on macOS runs Linux VM without Metal. Use native build for GPU on Mac.
+**Note**: Docker on macOS runs Linux VM without CoreML. Use native build for GPU on Mac.
 
 ## Services
 
@@ -279,10 +286,10 @@ unset BBT_FORCE_CPU
 export BBT_EMBEDDING_BATCH_SIZE=64
 ```
 
-**metal not detected (macos)**:
+**coreml not detected (macos)**:
 ```bash
-# verify metal support
-LOG_LEVEL=debug ./target/release/bbt serve 2>&1 | grep -i metal
+# verify coreml support
+LOG_LEVEL=debug ./target/release/bbt serve 2>&1 | grep -i coreml
 
 # check not running in docker
 uname -s  # should be "Darwin", not "Linux"

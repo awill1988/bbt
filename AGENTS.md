@@ -14,6 +14,7 @@
 - **Concurrency**: Use channels (`std::sync::mpsc` or `tokio::sync::mpsc`) for message passing between threads. Use `Arc<Mutex<T>>` for shared state, but prefer message passing when possible.
 - **Performance**: Use iterators and their combinators for efficient data processing. Avoid unnecessary allocations. Profile hot paths when performance is critical.
 - **Tooling**: Run `cargo clippy` regularly to get suggestions on improving code to be more correct and idiomatic. Use `cargo fmt` to maintain a consistent code style.
+- **Warnings**: Do not leave compiler warnings behind; fix them or call out why they must remain.
 
 ## Embeddings and temporal features
 

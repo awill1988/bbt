@@ -63,6 +63,9 @@ tesseract = "0.15"
 # ONNX (embeddings + reranking)
 ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
 
+# Parallel processing
+rayon = "1.8"
+
 # Vector DB
 qdrant-client = ">=1.11, <1.13"
 

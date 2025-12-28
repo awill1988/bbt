@@ -1,8 +1,13 @@
-use crate::error::{BbtError, Result};
 use crate::embedding::models::EmbeddingModelInfo;
+use crate::error::{BbtError, Result};
+use ort::execution_providers::{
+    CoreMLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider,
+    ExecutionProvider as OrtExecutionProvider,
+};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor;
+use std::env;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -11,6 +16,8 @@ use tokenizers::Tokenizer;
 pub enum ExecutionProvider {
     /// CPU provider (always available)
     Cpu,
+    /// CoreML provider (macOS)
+    Coreml,
     /// CUDA provider (NVIDIA GPUs)
     Cuda,
 }
@@ -19,35 +26,50 @@ impl ExecutionProvider {
     /// Detect available execution providers
     /// Returns the best available provider
     pub fn detect() -> Self {
-        // check for CUDA availability on Linux
-        #[cfg(target_os = "linux")]
+        if is_force_cpu() {
+            tracing::info!("gpu acceleration disabled (cpu mode forced)");
+            return Self::Cpu;
+        }
+
+        #[cfg(target_vendor = "apple")]
         {
-            if Self::is_cuda_available() {
-                return Self::Cuda;
+            if cfg!(feature = "coreml")
+                && CoreMLExecutionProvider::default()
+                    .is_available()
+                    .unwrap_or(false)
+            {
+                return Self::Coreml;
             }
         }
 
-        // default to CPU
-        Self::Cpu
-    }
+        if cfg!(feature = "cuda")
+            && CUDAExecutionProvider::default()
+                .is_available()
+                .unwrap_or(false)
+        {
+            return Self::Cuda;
+        }
 
-    /// Check if CUDA is available
-    #[cfg(target_os = "linux")]
-    fn is_cuda_available() -> bool {
-        // check for nvidia-smi or CUDA libraries
-        std::process::Command::new("nvidia-smi")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        Self::Cpu
     }
 
     /// Get provider name as string
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
+            Self::Coreml => "coreml",
             Self::Cuda => "cuda",
         }
     }
+}
+
+fn is_force_cpu() -> bool {
+    env::var("BBT_FORCE_CPU")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
 }
 
 /// ONNX-based embedding generator
@@ -81,14 +103,40 @@ impl OnnxEmbedder {
 
         // load onnx session with minimal settings to prevent deadlocks and hangs
         // disable all optimizations and force single-threaded execution
-        let session = Session::builder()
+        let session_builder = Session::builder()
             .map_err(|e| BbtError::Model(format!("failed to create session builder: {}", e)))?
             .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?
             .with_intra_threads(1)
             .map_err(|e| BbtError::Model(format!("failed to set intra threads: {}", e)))?
             .with_inter_threads(1)
-            .map_err(|e| BbtError::Model(format!("failed to set inter threads: {}", e)))?
+            .map_err(|e| BbtError::Model(format!("failed to set inter threads: {}", e)))?;
+
+        let session_builder = match provider {
+            ExecutionProvider::Cuda => session_builder
+                .with_execution_providers([
+                    CUDAExecutionProvider::default().build(),
+                    CPUExecutionProvider::default().build(),
+                ])
+                .map_err(|e| {
+                    BbtError::Model(format!("failed to set execution providers: {}", e))
+                })?,
+            ExecutionProvider::Coreml => session_builder
+                .with_execution_providers([
+                    CoreMLExecutionProvider::default().build(),
+                    CPUExecutionProvider::default().build(),
+                ])
+                .map_err(|e| {
+                    BbtError::Model(format!("failed to set execution providers: {}", e))
+                })?,
+            ExecutionProvider::Cpu => session_builder
+                .with_execution_providers([CPUExecutionProvider::default().build()])
+                .map_err(|e| {
+                    BbtError::Model(format!("failed to set execution providers: {}", e))
+                })?,
+        };
+
+        let session = session_builder
             .commit_from_file(model_path)
             .map_err(|e| BbtError::Model(format!("failed to load model from {:?}: {}", model_path, e)))?;
 
@@ -106,6 +154,7 @@ impl OnnxEmbedder {
             dimensions = model_info.dimensions,
             "initialized onnx embedder"
         );
+        tracing::info!("embedding provider: {}", provider.as_str());
 
         Ok(Self {
             session,
@@ -313,12 +362,16 @@ mod tests {
     fn test_execution_provider_detect() {
         let provider = ExecutionProvider::detect();
         // should always have at least CPU
-        assert!(provider == ExecutionProvider::Cpu || provider == ExecutionProvider::Cuda);
+        assert!(matches!(
+            provider,
+            ExecutionProvider::Cpu | ExecutionProvider::Coreml | ExecutionProvider::Cuda
+        ));
     }
 
     #[test]
     fn test_execution_provider_as_str() {
         assert_eq!(ExecutionProvider::Cpu.as_str(), "cpu");
+        assert_eq!(ExecutionProvider::Coreml.as_str(), "coreml");
         assert_eq!(ExecutionProvider::Cuda.as_str(), "cuda");
     }
 

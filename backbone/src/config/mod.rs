@@ -32,6 +32,8 @@ pub struct BbtConfig {
     pub embedding_model_repo: String,
     pub embedding_model_file: String,
     pub embedding_batch_size: usize,
+    pub embedding_workers: usize,
+    pub embedding_queue_size: usize,
     pub embedding_dims: usize,
 
     // Retrieval
@@ -157,6 +159,22 @@ impl BbtConfig {
         if self.bm25_b < 0.0 || self.bm25_b > 1.0 {
             return Err(crate::error::BbtError::Schema(
                 "bm25_b must be between 0 and 1".to_string(),
+            ));
+        }
+
+        if self.embedding_workers == 0 {
+            return Err(crate::error::BbtError::Schema(
+                "embedding_workers must be greater than 0".to_string(),
+            ));
+        }
+        if self.embedding_queue_size == 0 {
+            return Err(crate::error::BbtError::Schema(
+                "embedding_queue_size must be greater than 0".to_string(),
+            ));
+        }
+        if self.embedding_queue_size < self.embedding_workers {
+            return Err(crate::error::BbtError::Schema(
+                "embedding_queue_size must be at least embedding_workers".to_string(),
             ));
         }
 

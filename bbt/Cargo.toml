@@ -3,13 +3,19 @@ name = "bbt"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+cuda = ["backbone/cuda"]
+coreml = ["backbone/coreml"]
+
 [dependencies]
 anyhow = { workspace = true }
 backbone = { path = "../backbone" }
 clap = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
 ignore = { workspace = true }
 indicatif = { workspace = true }
+rayon = { workspace = true }
 console = { workspace = true }
 mimalloc = "0.1.39"
 qdrant-client = { workspace = true }

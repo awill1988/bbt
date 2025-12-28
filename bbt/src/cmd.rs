@@ -790,7 +790,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     );
     eprintln!("debug: starting main sync loop");
 
-    for candidate in candidates {
+    'file_loop: for candidate in candidates {
         let filename = candidate
             .path
             .file_name()
@@ -898,113 +898,77 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             continue;
         }
 
-        let embeddings = match embedder.embed(&chunks) {
-            Ok(em) => em,
-            Err(e) => {
+        // process chunks in batches to avoid memory exhaustion
+        let chunk_batch_size = 32; // process 32 chunks at a time
+        let mut all_points = Vec::new();
+
+        for chunk_batch_start in (0..chunks.len()).step_by(chunk_batch_size) {
+            let chunk_batch_end = (chunk_batch_start + chunk_batch_size).min(chunks.len());
+            let chunk_batch = &chunks[chunk_batch_start..chunk_batch_end];
+
+            let embeddings = match embedder.embed(chunk_batch) {
+                Ok(em) => em,
+                Err(e) => {
+                    tracing::error!(
+                        "failed to embed chunk batch [{}-{}) for {:?}: {}",
+                        chunk_batch_start,
+                        chunk_batch_end,
+                        file_path,
+                        e
+                    );
+                    let _ = state_store.record_failure(
+                        &source_path,
+                        Some(doc.file_hash.clone()),
+                        file_size_bytes,
+                        modified_at,
+                        format!("embedding failed: {e}"),
+                    );
+                    let _ = state_store.mark_failed(&source_path, e.to_string());
+                    let files_message = right_align_truncate(&display_name, files_message_width);
+                    let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                    files_bar.set_message(files_message);
+                    bytes_bar.set_message(bytes_message);
+                    files_bar.inc(1);
+                    bytes_bar.inc(candidate.size_bytes);
+                    continue 'file_loop;
+                }
+            };
+
+            if embeddings.len() != chunk_batch.len() {
                 tracing::error!(
-                    "failed to embed chunks for {:?}: {}",
+                    "embedding count mismatch for {:?} batch [{}-{}): chunks={}, embeddings={}",
                     file_path,
-                    e
+                    chunk_batch_start,
+                    chunk_batch_end,
+                    chunk_batch.len(),
+                    embeddings.len()
                 );
-                let _ = state_store.record_failure(
-                    &source_path,
-                    Some(doc.file_hash.clone()),
-                    file_size_bytes,
-                    modified_at,
-                    format!("embedding failed: {e}"),
-                );
-                let _ = state_store.mark_failed(&source_path, e.to_string());
-                let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = right_align_truncate(&display_name, bytes_message_width);
-                files_bar.set_message(files_message);
-                bytes_bar.set_message(bytes_message);
-                files_bar.inc(1);
-                bytes_bar.inc(candidate.size_bytes);
-                continue;
+                continue 'file_loop;
             }
-        };
 
-        // debug: trace embedding values
-        if !embeddings.is_empty() {
-            let first_emb = &embeddings[0];
-            let sum: f32 = first_emb.iter().sum();
-            let first_5: Vec<f32> = first_emb.iter().take(5).copied().collect();
-            tracing::debug!(
-                "sync_documents: embeddings count={}, first vector: len={}, sum={}, first_5={:?}",
-                embeddings.len(),
-                first_emb.len(),
-                sum,
-                first_5
-            );
-        }
+            // create points for this batch
+            for (chunk_text, embedding) in chunk_batch.iter().zip(embeddings.into_iter()) {
+                let chunk_id = Uuid::new_v4().to_string();
+                let mut payload: HashMap<String, Value> = HashMap::new();
+                payload.insert("text".to_string(), chunk_text.clone().into());
+                payload.insert(
+                    "source".to_string(),
+                    file_path.to_string_lossy().to_string().into(),
+                );
 
-        if embeddings.is_empty() {
-            tracing::warn!(
-                "skipping file {:?} because embeddings are empty",
-                file_path
-            );
-            let _ = state_store.record_failure(
-                &source_path,
-                Some(doc.file_hash.clone()),
-                file_size_bytes,
-                modified_at,
-                "embeddings empty".to_string(),
-            );
-            let _ = state_store.mark_failed(&source_path, "embeddings empty".to_string());
-            let files_message = right_align_truncate(&display_name, files_message_width);
-            let bytes_message = right_align_truncate(&display_name, bytes_message_width);
-            files_bar.set_message(files_message);
-            bytes_bar.set_message(bytes_message);
-            files_bar.inc(1);
-            bytes_bar.inc(candidate.size_bytes);
-            continue;
-        }
+                let point = PointStruct::new(chunk_id.clone(), embedding, payload);
+                all_points.push(point);
 
-        if embeddings.len() != chunks.len() {
-            tracing::error!(
-                "embedding count mismatch for {:?}: chunks={}, embeddings={}",
-                file_path,
-                chunks.len(),
-                embeddings.len()
-            );
-            let _ = state_store.record_failure(
-                &source_path,
-                Some(doc.file_hash.clone()),
-                file_size_bytes,
-                modified_at,
-                "embedding count mismatch".to_string(),
-            );
-            let _ =
-                state_store.mark_failed(&source_path, "embedding count mismatch".to_string());
-            let files_message = right_align_truncate(&display_name, files_message_width);
-            let bytes_message = right_align_truncate(&display_name, bytes_message_width);
-            files_bar.set_message(files_message);
-            bytes_bar.set_message(bytes_message);
-            files_bar.inc(1);
-            bytes_bar.inc(candidate.size_bytes);
-            continue;
-        }
-
-        // create points and add to bm25 index
-        let mut points = Vec::new();
-        for (chunk_text, embedding) in chunks.into_iter().zip(embeddings.into_iter()) {
-            // generate unique id for chunk
-            let chunk_id = Uuid::new_v4().to_string();
-
-            // create qdrant point
-            let mut payload: HashMap<String, Value> = HashMap::new();
-            payload.insert("text".to_string(), chunk_text.clone().into());
-            payload.insert(
-                "source".to_string(),
-                file_path.to_string_lossy().to_string().into(),
-            );
-            points.push(PointStruct::new(chunk_id.clone(), embedding, payload));
-
-            // add to bm25 index
-            if let Err(e) = bm25_index.add_document(&chunk_id, &chunk_text) {
-                tracing::warn!("failed to add chunk {} to bm25 index: {}", chunk_id, e);
+                // add to bm25 index
+                let _ = bm25_index.add_document(&chunk_id, chunk_text);
             }
         }
+
+        tracing::debug!(
+            "created {} points for {:?}",
+            all_points.len(),
+            file_path
+        );
 
         // retry upsert with exponential backoff
         let mut retry_count = 0;
@@ -1013,11 +977,11 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
         while retry_count <= max_retries && !success {
             let upsert_request =
-                UpsertPointsBuilder::new(collection_name.clone(), points.clone()).build();
+                UpsertPointsBuilder::new(collection_name.clone(), all_points.clone()).build();
             match qdrant_client.upsert_points(upsert_request).await {
                 Ok(_) => {
                     tracing::debug!("successfully ingested file {:?}", file_path);
-                    let _ = state_store.mark_complete(&source_path, points.len());
+                    let _ = state_store.mark_complete(&source_path, all_points.len());
                     let _ = state_store.clear_failure(&source_path);
                     let files_message = right_align_truncate(&display_name, files_message_width);
                     let bytes_message = right_align_truncate(&display_name, bytes_message_width);

@@ -51,3 +51,5 @@ result-*
 .cache/
 documents/
 data/
+
+dhat-heap*.json

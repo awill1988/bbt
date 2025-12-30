@@ -13,6 +13,11 @@ exporters:
   debug:
     verbosity: detailed
 
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
   # langfuse exporter - uses auto-provisioned project from docker-compose.yml
   otlphttp/langfuse:
     endpoint: http://langfuse-web:3000/api/public/ingestion
@@ -30,4 +35,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug, otlphttp/langfuse]
+      exporters: [debug, jaeger, otlphttp/langfuse]

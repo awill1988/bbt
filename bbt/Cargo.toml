@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 cuda = ["backbone/cuda"]
 coreml = ["backbone/coreml"]
+heap-profiling = ["dep:dhat", "dep:ctrlc"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -18,10 +19,15 @@ indicatif = { workspace = true }
 rayon = { workspace = true }
 console = { workspace = true }
 mimalloc = "0.1.39"
+dhat = { workspace = true, optional = true }
+ctrlc = { workspace = true, optional = true }
+once_cell = { workspace = true }
 qdrant-client = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
+tokenizers = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 walkdir = { workspace = true }
+num_cpus = { workspace = true }

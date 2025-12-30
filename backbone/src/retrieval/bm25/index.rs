@@ -7,7 +7,6 @@ use std::collections::HashMap;
 pub struct DocumentStats {
     pub doc_id: String,
     pub doc_length: usize,
-    pub chunk_text: String,
 }
 
 /// in-memory bm25 inverted index
@@ -60,7 +59,6 @@ impl Bm25Index {
             DocumentStats {
                 doc_id: doc_id.to_string(),
                 doc_length,
-                chunk_text: text.to_string(),
             },
         );
 

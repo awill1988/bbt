@@ -106,3 +106,10 @@ tempfile = "3.23"
 
 # Git
 git2 = "0.18"
+
+# Heap profiling
+dhat = "0.3"
+ctrlc = "3.4"
+
+# System info
+num_cpus = "1.16"

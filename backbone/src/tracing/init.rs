@@ -79,16 +79,22 @@ where
     }
 }
 
+fn read_bool_env(keys: &[&str], default: bool) -> bool {
+    for key in keys {
+        if let Ok(value) = env::var(key) {
+            let value = value.to_lowercase();
+            return value == "1" || value == "true" || value == "yes";
+        }
+    }
+    default
+}
+
 pub fn init_tracing(service_name: &str, log_sender: Option<Sender<String>>) -> Result<OtelGuard> {
-    let enabled = env::var("BBT_ENABLE_TRACING")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false);
+    let enabled = read_bool_env(&["ENABLE_TRACING"], false);
 
     let endpoint = env::var("PHOENIX_COLLECTOR_ENDPOINT")
         .or_else(|_| env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+        .or_else(|_| env::var("OTEL_ENDPOINT"))
         .ok();
 
     let env_filter =

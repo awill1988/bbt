@@ -11,23 +11,23 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - BBT_ENABLE_TRACING=${BBT_ENABLE_TRACING:-true}
+      - ENABLE_TRACING=${ENABLE_TRACING:-true}
       - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://otel-collector:4317}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       - HF_HOME=/app/.cache
-      - BBT_DATA_DIR=/app/data
-      - BBT_QDRANT_URL=http://qdrant:6333
-      - BBT_STATE_STORE_PATH=/app/data/state.db
-      - BBT_VECTOR_STORE_TYPE=qdrant
-      - BBT_RETRIEVAL_MODE=hybrid
-      - BBT_TOP_K=20
-      - BBT_VECTOR_WEIGHT=0.5
-      - BBT_BM25_WEIGHT=0.5
-      - BBT_MIN_SCORE=0.5
-      - BBT_CHUNK_SIZE=512
-      - BBT_CHUNK_OVERLAP=128
-      - BBT_FORCE_SYNC=false
-      - BBT_RESET_STATE=false
+      - DATA_DIR=/app/data
+      - QDRANT_URL=http://qdrant:6333
+      - STATE_STORE_PATH=/app/data/state.db
+      - VECTOR_STORE_TYPE=qdrant
+      - RETRIEVAL_MODE=hybrid
+      - TOP_K=20
+      - VECTOR_WEIGHT=0.5
+      - BM25_WEIGHT=0.5
+      - MIN_SCORE=0.5
+      - CHUNK_SIZE=512
+      - CHUNK_OVERLAP=128
+      - SYNC_FORCE=false
+      - SYNC_RESET_STATE=false
     volumes:
       - model_cache:/app/.cache
       - ./documents:/app/documents
@@ -59,24 +59,24 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - BBT_ENABLE_TRACING=${BBT_ENABLE_TRACING:-true}
+      - ENABLE_TRACING=${ENABLE_TRACING:-true}
       - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://otel-collector:4317}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       - HF_HOME=/app/.cache
-      - BBT_DATA_DIR=/app/data
-      - BBT_QDRANT_URL=http://qdrant:6333
-      - BBT_STATE_STORE_PATH=/app/data/state.db
-      - BBT_VECTOR_STORE_TYPE=qdrant
-      - BBT_RETRIEVAL_MODE=hybrid
-      - BBT_TOP_K=20
-      - BBT_VECTOR_WEIGHT=0.5
-      - BBT_BM25_WEIGHT=0.5
-      - BBT_MIN_SCORE=0.5
-      - BBT_CHUNK_SIZE=512
-      - BBT_CHUNK_OVERLAP=128
-      - BBT_FORCE_SYNC=false
-      - BBT_RESET_STATE=false
-      - BBT_FORCE_CPU=1
+      - DATA_DIR=/app/data
+      - QDRANT_URL=http://qdrant:6333
+      - STATE_STORE_PATH=/app/data/state.db
+      - VECTOR_STORE_TYPE=qdrant
+      - RETRIEVAL_MODE=hybrid
+      - TOP_K=20
+      - VECTOR_WEIGHT=0.5
+      - BM25_WEIGHT=0.5
+      - MIN_SCORE=0.5
+      - CHUNK_SIZE=512
+      - CHUNK_OVERLAP=128
+      - SYNC_FORCE=false
+      - SYNC_RESET_STATE=false
+      - FORCE_CPU=1
     volumes:
       - model_cache:/app/.cache
       - ./data:/app/data
@@ -110,6 +110,12 @@ services:
       - "4317:4317" # otlp grpc
       - "4318:4318" # otlp http
       - "13133:13133" # health check
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    restart: unless-stopped
+    ports:
+      - "16686:16686"
 
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3

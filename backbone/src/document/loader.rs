@@ -380,17 +380,26 @@ impl DocumentLoader {
         match fs::read_to_string(path) {
             Ok(content) => Ok(content),
             Err(e) => {
-                // if utf-8 fails, try lossy conversion
-                tracing::debug!("utf-8 read failed for {:?}, trying lossy conversion: {}", path, e);
+                // if utf-8 fails, try other encodings
+                tracing::debug!("utf-8 read failed for {:?}, trying other encodings: {}", path, e);
                 let bytes = fs::read(path)?;
 
-                // check if file is mostly binary (>10% null bytes)
-                let null_count = bytes.iter().filter(|&&b| b == 0).count();
-                let null_ratio = null_count as f32 / bytes.len() as f32;
-                if null_ratio > 0.1 {
+                // check for utf-16 bom or high null byte ratio (indicates utf-16)
+                if let Some(content) = try_decode_utf16(&bytes) {
+                    tracing::debug!("loaded {:?} as utf-16", path);
+                    return Ok(content);
+                }
+
+                // check if file is truly binary (control chars, not just nulls from encoding)
+                let non_text_count = bytes.iter().filter(|&&b| {
+                    // binary indicators: control chars except common whitespace
+                    b < 0x09 || (b > 0x0d && b < 0x20 && b != 0x1b)
+                }).count();
+                let non_text_ratio = non_text_count as f32 / bytes.len().max(1) as f32;
+                if non_text_ratio > 0.1 {
                     return Err(BbtError::Schema(format!(
-                        "file appears to be binary ({:.1}% null bytes)",
-                        null_ratio * 100.0
+                        "file appears to be binary ({:.1}% non-text bytes)",
+                        non_text_ratio * 100.0
                     )));
                 }
 
@@ -429,6 +438,71 @@ impl DocumentLoader {
             false
         }
     }
+}
+
+/// Try to decode bytes as UTF-16 (LE or BE)
+/// Returns Some(String) if successful, None if not UTF-16
+fn try_decode_utf16(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 2 {
+        return None;
+    }
+
+    // check for BOM
+    let (is_le, skip_bom) = if bytes.starts_with(&[0xFF, 0xFE]) {
+        (true, true) // UTF-16 LE BOM
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        (false, true) // UTF-16 BE BOM
+    } else {
+        // no BOM - check for UTF-16 LE pattern (ASCII text has nulls in odd positions)
+        // sample first 100 bytes to detect pattern
+        let sample_len = bytes.len().min(100);
+        let sample = &bytes[..sample_len];
+
+        // count nulls in even vs odd positions
+        let nulls_even = sample.iter().step_by(2).filter(|&&b| b == 0).count();
+        let nulls_odd = sample.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+
+        // UTF-16 LE ASCII: nulls in odd positions (every other byte after first)
+        // UTF-16 BE ASCII: nulls in even positions
+        let sample_pairs = sample_len / 2;
+        if sample_pairs > 0 {
+            let odd_ratio = nulls_odd as f32 / sample_pairs as f32;
+            let even_ratio = nulls_even as f32 / sample_pairs as f32;
+
+            if odd_ratio > 0.4 {
+                (true, false) // likely UTF-16 LE
+            } else if even_ratio > 0.4 {
+                (false, false) // likely UTF-16 BE
+            } else {
+                return None; // not UTF-16
+            }
+        } else {
+            return None;
+        }
+    };
+
+    // decode UTF-16
+    let start = if skip_bom { 2 } else { 0 };
+    let u16_iter: Box<dyn Iterator<Item = u16>> = if is_le {
+        Box::new(
+            bytes[start..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        )
+    } else {
+        Box::new(
+            bytes[start..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        )
+    };
+
+    // convert to String, replacing invalid surrogates
+    let chars: String = char::decode_utf16(u16_iter)
+        .map(|r| r.unwrap_or('\u{FFFD}'))
+        .collect();
+
+    Some(chars)
 }
 
 impl Default for DocumentLoader {

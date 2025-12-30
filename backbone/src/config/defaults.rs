@@ -3,6 +3,8 @@ use crate::config::feature_flags::FeatureFlags;
 use std::path::PathBuf;
 
 fn default_embedding_workers() -> usize {
+    // workers share session pool, so memory overhead per worker is minimal
+    // use all available cores for maximum throughput
     std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1)
@@ -39,7 +41,7 @@ pub fn default_config() -> BbtConfig {
         // Embedding (jina-embeddings-v2-base-code: 768 dims, 8192 token context)
         embedding_model_repo: "jinaai/jina-embeddings-v2-base-code".to_string(),
         embedding_model_file: "onnx/model.onnx".to_string(),
-        embedding_batch_size: 32,
+        embedding_batch_size: 128, // large batches for gpu throughput
         embedding_workers,
         embedding_queue_size,
         embedding_dims: 768,

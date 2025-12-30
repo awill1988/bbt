@@ -104,12 +104,7 @@ pub fn detect_gpu_backend() -> GpuBackend {
 
 pub fn get_gpu_config() -> GpuConfig {
     // check for force CPU override
-    let force_cpu = env::var("BBT_FORCE_CPU")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false);
+    let force_cpu = read_bool_env(&["FORCE_CPU"]);
 
     if force_cpu {
         tracing::info!("gpu acceleration disabled (cpu mode forced)");
@@ -132,7 +127,7 @@ pub fn get_gpu_config() -> GpuConfig {
     }
 
     // get layer count from env or default to -1 (all layers)
-    let n_gpu_layers = env::var("BBT_GPU_LAYERS")
+    let n_gpu_layers = env::var("GPU_LAYERS")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(-1);
@@ -154,6 +149,16 @@ pub fn get_gpu_config() -> GpuConfig {
         backend,
         available: true,
     }
+}
+
+fn read_bool_env(keys: &[&str]) -> bool {
+    for key in keys {
+        if let Ok(value) = env::var(key) {
+            let value = value.to_lowercase();
+            return value == "1" || value == "true" || value == "yes";
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -195,13 +195,13 @@ RUN mkdir -p /app/.cache /app/data /app/documents /app/models && \
 
 # set environment variables
 ENV LOG_LEVEL=info \
-    BBT_DATA_DIR=/app/data \
-    BBT_MODEL_CACHE_DIR=/app/models \
+    DATA_DIR=/app/data \
+    MODEL_CACHE_DIR=/app/models \
     HF_HOME=/app/.cache \
     # pdfium library path
     LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH} \
     # disable gpu by default (can be overridden)
-    BBT_FORCE_CPU=${ENABLE_GPU:+0}${ENABLE_GPU:-1}
+    FORCE_CPU=${ENABLE_GPU:+0}${ENABLE_GPU:-1}
 
 # expose api port
 EXPOSE 8080

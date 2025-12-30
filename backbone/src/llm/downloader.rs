@@ -14,7 +14,7 @@ pub fn ensure_gguf_model(
     // read from environment variables if not provided
     let repo_id = repo_id
         .or_else(|| {
-            env::var("BBT_SCHEMA_REPO_ID")
+            env::var("GEN_SCHEMA_REPO_ID")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
@@ -22,7 +22,7 @@ pub fn ensure_gguf_model(
 
     let filename = filename
         .or_else(|| {
-            env::var("BBT_SCHEMA_FILENAME")
+            env::var("GEN_SCHEMA_FILENAME")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
@@ -30,7 +30,7 @@ pub fn ensure_gguf_model(
 
     let cache_dir = cache_dir
         .or_else(|| {
-            env::var("BBT_CACHE_DIR")
+            env::var("MODEL_CACHE_DIR")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)

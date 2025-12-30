@@ -14,11 +14,12 @@ impl Default for Bm25Params {
 }
 
 /// search result with score
+/// note: text should be fetched from vector store, not stored in bm25 index
 #[derive(Debug, Clone)]
 pub struct ScoredResult {
     pub doc_id: String,
     pub score: f32,
-    pub text: String,
+    pub text: String, // populated by caller from vector store
 }
 
 /// bm25 scorer
@@ -58,20 +59,16 @@ impl Bm25Scorer {
         }
 
         // score all documents
+        // note: text is set to empty here and should be populated by caller from vector store
         let mut scored_docs: Vec<ScoredResult> = index
             .doc_ids()
             .into_iter()
             .map(|doc_id| {
                 let score = self.score_document(index, &query_terms, &doc_id);
-                let text = index
-                    .get_document(&doc_id)
-                    .map(|d| d.chunk_text.clone())
-                    .unwrap_or_default();
-
                 ScoredResult {
                     doc_id,
                     score,
-                    text,
+                    text: String::new(), // caller should fetch from vector store
                 }
             })
             .filter(|r| r.score > 0.0) // filter non-matching documents

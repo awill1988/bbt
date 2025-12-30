@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tokenizers::Tokenizer;
 
 #[derive(Parser)]
 #[command(name = "bbt")]
@@ -41,6 +42,8 @@ struct EmbeddingTask {
     modified_at: Option<chrono::DateTime<chrono::Utc>>,
     file_hash: String,
     chunks: Vec<String>,
+    /// total bytes across all chunks for adaptive batch sizing
+    total_chunk_bytes: usize,
 }
 
 struct EmbeddingResult {
@@ -67,11 +70,11 @@ pub struct SyncCommand {
     honor_gitignore: bool,
 
     /// Force reprocessing even if unchanged
-    #[clap(long, env = "BBT_FORCE_SYNC", default_value = "false")]
+    #[clap(long, env = "SYNC_FORCE", default_value = "false")]
     force: bool,
 
     /// Reset the processing state before syncing
-    #[clap(long, env = "BBT_RESET_STATE", default_value = "false")]
+    #[clap(long, env = "SYNC_RESET_STATE", default_value = "false")]
     reset_state: bool,
 
     /// Index git commits in addition to documents
@@ -85,6 +88,14 @@ pub struct SyncCommand {
     /// Only index commits since this date (ISO 8601 format: YYYY-MM-DD)
     #[clap(long)]
     commits_since: Option<String>,
+
+    /// Files larger than this (in KiB) get exclusive GPU access
+    #[clap(long, default_value = "20")]
+    large_file_threshold_kib: usize,
+
+    /// Max bytes in-flight across all sessions (in KiB, max 150)
+    #[clap(long, default_value = "128")]
+    max_pool_bytes_kib: usize,
 }
 
 #[derive(Args)]
@@ -235,15 +246,15 @@ enum GenCommands {
         json_schema_output: Option<PathBuf>,
 
         /// Model repository ID
-        #[arg(long, env = "BBT_SCHEMA_REPO_ID")]
+        #[arg(long, env = "GEN_SCHEMA_REPO_ID")]
         repo_id: Option<String>,
 
         /// Model filename
-        #[arg(long, env = "BBT_SCHEMA_FILENAME")]
+        #[arg(long, env = "GEN_SCHEMA_FILENAME")]
         filename: Option<String>,
 
         /// Model cache directory
-        #[arg(long, env = "BBT_MODEL_CACHE_DIR")]
+        #[arg(long, env = "MODEL_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
     },
     /// Generate JSON Schema from JSON payload
@@ -257,15 +268,15 @@ enum GenCommands {
         output: PathBuf,
 
         /// Model repository ID
-        #[arg(long, env = "BBT_SCHEMA_REPO_ID")]
+        #[arg(long, env = "GEN_SCHEMA_REPO_ID")]
         repo_id: Option<String>,
 
         /// Model filename
-        #[arg(long, env = "BBT_SCHEMA_FILENAME")]
+        #[arg(long, env = "GEN_SCHEMA_FILENAME")]
         filename: Option<String>,
 
         /// Model cache directory
-        #[arg(long, env = "BBT_MODEL_CACHE_DIR")]
+        #[arg(long, env = "MODEL_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
     },
 }
@@ -467,6 +478,7 @@ async fn process_embedding_result(
         modified_at,
         file_hash,
         chunks,
+        total_chunk_bytes: _, // used for adaptive batch sizing in worker
     } = task;
 
     let embeddings = match embeddings {
@@ -482,7 +494,7 @@ async fn process_embedding_result(
             );
             let _ = state_store.mark_failed(&source_path, err);
             let files_message = right_align_truncate(&display_name, files_message_width);
-            let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+            let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
             files_bar.set_message(files_message);
             bytes_bar.set_message(bytes_message);
             files_bar.inc(1);
@@ -507,7 +519,7 @@ async fn process_embedding_result(
         );
         let _ = state_store.mark_failed(&source_path, "embedding count mismatch".to_string());
         let files_message = right_align_truncate(&display_name, files_message_width);
-        let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+        let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
         files_bar.set_message(files_message);
         bytes_bar.set_message(bytes_message);
         files_bar.inc(1);
@@ -546,7 +558,7 @@ async fn process_embedding_result(
                 let _ = state_store.mark_complete(&source_path, all_points.len());
                 let _ = state_store.clear_failure(&source_path);
                 let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
                 files_bar.set_message(files_message);
                 bytes_bar.set_message(bytes_message);
                 files_bar.inc(1);
@@ -582,7 +594,7 @@ async fn process_embedding_result(
                     );
                     let _ = state_store.mark_failed(&source_path, e.to_string());
                     let files_message = right_align_truncate(&display_name, files_message_width);
-                    let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                    let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
                     files_bar.set_message(files_message);
                     bytes_bar.set_message(bytes_message);
                     files_bar.inc(1);
@@ -648,15 +660,9 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
 
-    eprintln!("debug: loading config");
     let config = BbtConfig::from_env()?;
-    eprintln!("debug: config loaded");
-
-    eprintln!("debug: creating document loader");
     let loader = DocumentLoader::with_max_size(config.max_file_size_bytes)?;
-    eprintln!("debug: loader created");
     let state_path = config.state_store_path.clone();
-    eprintln!("debug: checking reset_state flag");
     if args.reset_state {
         if state_path.exists() {
             tracing::info!(
@@ -674,25 +680,17 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             let _ = fs::remove_file(shm_path);
         }
     }
-    eprintln!("debug: creating state store at {:?}", state_path);
     let mut state_store = StateStore::new(&state_path)?;
-    eprintln!("debug: state store created");
-    eprintln!("debug: finalizing incomplete");
     let incomplete = state_store.finalize_incomplete("interrupted")?;
     if incomplete > 0 {
         tracing::info!("marked {} in-progress files as failed", incomplete);
     }
-    eprintln!("debug: expanding extensions");
     let extensions = expand_extensions(&args.ext);
-    eprintln!("debug: extensions expanded: {} total", extensions.len());
 
-    eprintln!("debug: creating term");
     let term = Term::stderr();
     let term_width = usize::from(term.size().1);
-    eprintln!("debug: creating multi progress");
     let progress = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
     progress.set_move_cursor(true);
-    eprintln!("debug: creating scan_bar");
     let scan_bar = progress.add(ProgressBar::new_spinner());
     scan_bar.set_style(
         ProgressStyle::with_template("{prefix} {spinner} {msg}")?
@@ -701,13 +699,11 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     scan_bar.set_prefix("scan");
     scan_bar.enable_steady_tick(std::time::Duration::from_millis(120));
 
-    eprintln!("debug: creating log_bar");
     let log_bar = progress.add(ProgressBar::new(0));
     log_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
     log_bar.set_prefix("log");
     log_bar.set_message("ready");
 
-    eprintln!("debug: creating log channel and thread");
     let log_message_width = log_message_width(term_width, log_bar.prefix().len());
     let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
     let log_bar_handle = log_bar.clone();
@@ -721,26 +717,16 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         }
     });
 
-    eprintln!("debug: initializing tracing");
     let _guard = init_tracing("bbt", Some(log_tx.clone()))?;
-    eprintln!("debug: tracing initialized");
 
-    eprintln!("debug: building scan scope key");
     let scan_scope_key = build_scan_scope_key(&args, &extensions);
-    eprintln!("debug: scan scope key: {}", scan_scope_key);
     let scan_message_width = scan_message_width(term_width, scan_bar.prefix().len());
 
-    eprintln!("debug: getting scan run from state store");
     let scan_run = state_store.get_scan_run(&scan_scope_key)?;
-    eprintln!("debug: got scan run: {:?}", scan_run.is_some());
     let (candidates, scan_totals, scan_run_id) = if let Some(run) = scan_run {
-        eprintln!("debug: scan run exists, checking status");
         if run.status == backbone::storage::ScanStatus::Complete {
-            eprintln!("debug: scan status is complete, getting summary");
             let summary = state_store.scan_entries_summary(&scan_scope_key, &run.run_id)?;
-            eprintln!("debug: summary: files_seen={}, run.files_seen={}", summary.files_seen, run.files_seen);
             if summary.files_seen == 0 && run.files_seen > 0 {
-                eprintln!("debug: cache empty, re-scanning");
                 tracing::warn!("scan cache empty; re-scanning");
                 let scan_progress = state_store.start_scan(&scan_scope_key)?;
                 let (candidates, scan_totals) = collect_candidates(
@@ -762,7 +748,6 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                 );
                 (candidates, scan_totals, scan_progress.run_id)
             } else {
-                eprintln!("debug: using cached scan");
                 if summary.files_seen != run.files_seen
                     || summary.bytes_seen != run.bytes_seen
                 {
@@ -778,7 +763,6 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                         summary.bytes_seen
                     );
                 }
-                eprintln!("debug: setting scan_bar message");
                 scan_bar.set_message(format!(
                     "{} files, {} bytes",
                     summary.files_seen, summary.bytes_seen
@@ -788,9 +772,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     summary.files_seen,
                     summary.bytes_seen
                 );
-                eprintln!("debug: listing scan entries");
                 let entries = state_store.list_scan_entries(&scan_scope_key, &run.run_id)?;
-                eprintln!("debug: got {} entries", entries.len());
                 if summary.files_seen > 0 && entries.is_empty() {
                     tracing::warn!("scan cache empty; re-scanning");
                     let scan_progress = state_store.start_scan(&scan_scope_key)?;
@@ -813,7 +795,6 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     );
                     (candidates, scan_totals, scan_progress.run_id)
                 } else {
-                    eprintln!("debug: mapping entries to candidates");
                     let candidates = entries
                         .into_iter()
                         .map(|entry| FileCandidate {
@@ -822,18 +803,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                             modified_at: entry.modified_at,
                         })
                         .collect::<Vec<_>>();
-                    eprintln!("debug: mapped {} candidates", candidates.len());
-                    eprintln!("debug: finishing scan_bar");
                     scan_bar.finish_and_clear();
-                    eprintln!("debug: removing scan_bar from progress");
                     progress.remove(&scan_bar);
-                    eprintln!("debug: logging scan cached");
                     tracing::info!(
                         "scan cached: {} files, {} bytes",
                         summary.files_seen,
                         summary.bytes_seen
                     );
-                    eprintln!("debug: returning candidates tuple");
                     (
                         candidates,
                         ScanTotals {
@@ -902,12 +878,16 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         (candidates, scan_totals, scan_progress.run_id)
     };
 
-    eprintln!("debug: scan complete, got {} candidates", candidates.len());
     let total_files = scan_totals.files;
     let total_bytes = scan_totals.bytes;
-    eprintln!("debug: creating files_bar with {} files", total_files);
+
+    // create resource monitor bar
+    let resource_bar = progress.insert_before(&log_bar, ProgressBar::new_spinner());
+    let resource_style = ProgressStyle::with_template("{spinner:.green} {msg}")?;
+    resource_bar.set_style(resource_style);
+    resource_bar.enable_steady_tick(std::time::Duration::from_millis(500));
+
     let files_bar = progress.insert_before(&log_bar, ProgressBar::new(total_files));
-    eprintln!("debug: creating bytes_bar with {} bytes", total_bytes);
     let bytes_bar = progress.insert_before(&log_bar, ProgressBar::new(total_bytes));
 
     let files_style = ProgressStyle::with_template(
@@ -955,20 +935,24 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         );
     }
 
-    eprintln!("debug: setting progress bar positions");
     files_bar.set_position(resumed_files);
     bytes_bar.set_position(resumed_bytes);
 
-    eprintln!("debug: creating model_info");
     let model_info = EmbeddingModelInfo::default_model();
     let vector_dimensions = model_info.dimensions;
 
-    // ensure model is downloaded
-    eprintln!("debug: ensuring onnx model is downloaded");
     let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
-    eprintln!("debug: model path: {:?}", model_path);
     let embedding_provider = ExecutionProvider::detect();
-    eprintln!("debug: embedding provider: {}", embedding_provider.as_str());
+
+    // load tokenizer once and share across all workers to avoid memory duplication
+    let tokenizer_path = model_path.parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid model path"))?
+        .join("tokenizer.json");
+    let shared_tokenizer = std::sync::Arc::new(
+        Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("failed to load tokenizer from {:?}: {}", tokenizer_path, e))?
+    );
+
     let embedding_workers = config.embedding_workers.max(1);
     let embedding_queue_size = config.embedding_queue_size.max(embedding_workers);
     let embedding_batch_size = config.embedding_batch_size.max(1);
@@ -979,6 +963,59 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         embedding_batch_size
     );
 
+    // create pool of embedders for concurrent GPU access
+    // more sessions = better GPU utilization but more VRAM (~1.5 GiB per session)
+    // scale sessions with workers: 1 session per 4 workers, min 2, max based on workers
+    //
+    // to adjust session pool tolerance:
+    //   - high VRAM (24+ GiB): use `embedding_workers / 2` for more parallelism
+    //   - low VRAM (8 GiB):    use `(embedding_workers / 8).clamp(1, 4)` for fewer sessions
+    //   - balanced (12-16 GiB): current formula works well
+    let session_pool_size = (embedding_workers / 4).clamp(2, embedding_workers);
+    tracing::info!(
+        "initializing {} onnx sessions for concurrent GPU access",
+        session_pool_size
+    );
+
+    let mut embedder_pool: Vec<Arc<Mutex<OnnxEmbedder>>> = Vec::with_capacity(session_pool_size);
+    for i in 0..session_pool_size {
+        let embedder = OnnxEmbedder::new_with_shared_tokenizer(
+            &model_path,
+            model_info.clone(),
+            embedding_provider,
+            Arc::clone(&shared_tokenizer),
+            session_pool_size,
+        )?;
+        embedder_pool.push(Arc::new(Mutex::new(embedder)));
+        tracing::info!("session {}/{} initialized", i + 1, session_pool_size);
+    }
+    tracing::info!(
+        "{} sessions ready - {} workers will share them round-robin",
+        session_pool_size,
+        embedding_workers
+    );
+
+    // chunk budget: controls concurrent GPU memory pressure
+    // - small files share the pool up to total budget
+    // - large files (> threshold) wait for drain, then run exclusively
+    let max_chunks_in_flight = session_pool_size * 64;
+    let total_bytes_budget = args.max_pool_bytes_kib.min(150) * 1024; // convert KiB to bytes, max 150 KiB
+    let large_file_threshold = args.large_file_threshold_kib * 1024; // convert KiB to bytes
+    let chunk_budget = Arc::new(crate::chunk_budget::ChunkBudget::new(
+        max_chunks_in_flight,
+        total_bytes_budget,
+        large_file_threshold,
+    ));
+    tracing::info!(
+        "chunk budget: {} pool, files >{} run exclusively",
+        format_bytes_short(total_bytes_budget),
+        format_bytes_short(large_file_threshold),
+    );
+
+    // track active sessions for monitoring
+    let active_sessions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total_sessions = session_pool_size;
+
     let (task_tx, task_rx) = mpsc::sync_channel::<EmbeddingTask>(embedding_queue_size);
     let (result_tx, result_rx) = mpsc::sync_channel::<EmbeddingResult>(embedding_queue_size);
     let task_rx = Arc::new(Mutex::new(task_rx));
@@ -987,21 +1024,17 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     for worker_id in 0..embedding_workers {
         let task_rx = Arc::clone(&task_rx);
         let result_tx = result_tx.clone();
-        let model_path = model_path.clone();
-        let model_info = model_info.clone();
-        let embedding_provider = embedding_provider;
+        // assign worker to session round-robin
+        let session_id = worker_id % session_pool_size;
+        let embedder = Arc::clone(&embedder_pool[session_id]);
         let worker_batch_size = embedding_batch_size;
+        let chunk_budget = Arc::clone(&chunk_budget);
+        let active_sessions = Arc::clone(&active_sessions);
 
         let handle = thread::Builder::new()
             .name(format!("embedding_worker_{}", worker_id))
             .spawn(move || {
-                let mut embedder = match OnnxEmbedder::new(&model_path, model_info, embedding_provider) {
-                    Ok(embedder) => Some(embedder),
-                    Err(err) => {
-                        tracing::error!("failed to initialize embedder: {}", err);
-                        None
-                    }
-                };
+                tracing::info!("worker {} started (session {})", worker_id, session_id);
 
                 loop {
                     let task = {
@@ -1014,11 +1047,65 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                         Err(_) => break,
                     };
 
-                    let embeddings = if let Some(ref mut embedder) = embedder {
-                        embed_chunks(embedder, &task.chunks, worker_batch_size)
+                    let num_chunks = task.chunks.len();
+                    let is_large_file = task.total_chunk_bytes > chunk_budget.large_file_threshold();
+
+                    // acquire chunk budget before processing (blocks if over capacity)
+                    // large files wait for queue to drain, then run exclusively
+                    let size_kib = task.total_chunk_bytes / 1024;
+                    if is_large_file {
+                        tracing::warn!(
+                            "large file ({} KiB, {} chunks) - waiting for queue to drain",
+                            size_kib, num_chunks
+                        );
+                    }
+                    let _budget_guard = chunk_budget.acquire(num_chunks, task.total_chunk_bytes);
+                    if is_large_file {
+                        tracing::warn!(
+                            "large file ({} KiB, {} chunks) - now running exclusively",
+                            size_kib, num_chunks
+                        );
+                    }
+
+                    // adaptive batch size: larger files get larger batches to use more GPU
+                    // this gives large files proportionally more GPU resources
+                    let adaptive_batch_size = if !task.chunks.is_empty() && task.total_chunk_bytes > 0 {
+                        // scale batch size with file size:
+                        // - small files (<64 KiB): min batch (32)
+                        // - medium files (64 KiB - 1 MiB): scale 32-128
+                        // - large files (>1 MiB): max batch (256)
+                        let file_kb = task.total_chunk_bytes / 1024;
+                        let batch_size = if file_kb < 64 {
+                            32
+                        } else if file_kb < 1024 {
+                            // linear scale from 32 to 128 between 64KB and 1MB
+                            let ratio = (file_kb - 64) as f32 / (1024 - 64) as f32;
+                            32 + (ratio * 96.0) as usize
+                        } else {
+                            // large files get max batch for maximum GPU utilization
+                            worker_batch_size.min(256)
+                        };
+                        tracing::debug!(
+                            worker = worker_id,
+                            chunks = num_chunks,
+                            file_kb,
+                            batch_size,
+                            "adaptive batch: larger files get bigger batches"
+                        );
+                        batch_size.clamp(16, worker_batch_size)
                     } else {
-                        Err("embedder initialization failed".to_string())
+                        worker_batch_size
                     };
+
+                    // lock shared embedder for inference
+                    let embeddings = {
+                        let mut embedder = embedder.lock().expect("embedder lock poisoned");
+                        active_sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let result = embed_chunks(&mut *embedder, &task.chunks, adaptive_batch_size);
+                        active_sessions.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        result
+                    };
+                    // _budget_guard dropped here, releasing chunk capacity
 
                     if result_tx
                         .send(EmbeddingResult {
@@ -1037,69 +1124,133 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     drop(result_tx);
 
     // load or create bm25 index
-    eprintln!("debug: loading bm25 index");
     tracing::info!("loading bm25 index from {:?}", config.bm25_index_path);
     let mut bm25_index = load_index(&config.bm25_index_path)?;
     tracing::info!("bm25 index loaded with {} documents", bm25_index.num_docs());
-    eprintln!("debug: bm25 index loaded");
 
     // use rest client instead of grpc
-    eprintln!("debug: creating qdrant client, url={}", config.qdrant_url);
     let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
-        eprintln!("debug: using api key auth");
         Qdrant::from_url(&config.qdrant_url)
             .api_key(api_key.clone())
             .timeout(std::time::Duration::from_secs(60))
             .build()?
     } else {
-        eprintln!("debug: no api key, using simple auth");
         Qdrant::from_url(&config.qdrant_url)
             .timeout(std::time::Duration::from_secs(60))
             .build()?
     };
-    eprintln!("debug: qdrant client created");
 
     let collection_name = "bbt".to_string();
 
     // note: health_check() hangs with grpc client, skipping explicit health check
     // connection will be verified when we actually use the client
-    eprintln!("debug: skipping health check (grpc client health_check hangs)");
     tracing::info!("connecting to qdrant at {}", config.qdrant_url);
 
     // check if collection exists, create if needed
-    eprintln!("debug: checking if collection exists");
     use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
     let collection_exists = qdrant_client
         .collection_exists(&collection_name)
         .await
         .unwrap_or(false);
-    eprintln!("debug: collection_exists={}", collection_exists);
 
     if !collection_exists {
-        eprintln!("debug: creating collection");
         tracing::info!("creating collection '{}'", collection_name);
         let vector_params = VectorParamsBuilder::new(vector_dimensions as u64, Distance::Cosine).build();
         qdrant_client
             .create_collection(CreateCollectionBuilder::new(&collection_name).vectors_config(vector_params))
             .await?;
         tracing::info!("collection '{}' created", collection_name);
-        eprintln!("debug: collection created");
     } else {
-        eprintln!("debug: using existing collection");
         tracing::info!("using existing collection '{}'", collection_name);
     }
+    // create shared resource stats for profiling
+    #[cfg(feature = "heap-profiling")]
+    let shared_stats = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::resource_monitor::ResourceStats::default()
+    ));
 
-    eprintln!("debug: logging sync start");
+    // flag to delay resource monitor display until sync starts
+    let display_stats = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let display_stats_clone = Arc::clone(&display_stats);
+
+    // spawn resource monitor update task
+    let resource_bar_clone = resource_bar.clone();
+    let chunk_budget_clone = Arc::clone(&chunk_budget);
+    let active_sessions_clone = Arc::clone(&active_sessions);
+    #[cfg(feature = "heap-profiling")]
+    let shared_stats_clone = std::sync::Arc::clone(&shared_stats);
+
+    let resource_update_handle = std::thread::spawn(move || {
+        let mut monitor = crate::resource_monitor::ResourceMonitor::new();
+        loop {
+            // wait until sync has started before displaying stats
+            if !display_stats_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+
+            let stats = monitor.get_stats();
+            let active = active_sessions_clone.load(std::sync::atomic::Ordering::Relaxed);
+            let chunks_in_flight = chunk_budget_clone.chunks_in_flight();
+            let bytes_in_flight = chunk_budget_clone.bytes_in_flight();
+            let bytes_limit = chunk_budget_clone.total_bytes_budget();
+            let large_file = chunk_budget_clone.large_file_running();
+            // compact format with clear labels:
+            // cpu:820% gpu:12% mem:9.2g vram:1.5g sess:5/8 chunks:61 pool:15/128k [EXCL]
+            let pool_used_kib = bytes_in_flight / 1024;
+            let pool_limit_kib = bytes_limit / 1024;
+            let exclusive_tag = if large_file { "[EXCL]" } else { "      " }; // 6 chars fixed
+            let combined = format!(
+                "{} sess:{:>2}/{:<2} chunks:{:>4} pool:{:>3}/{}k {}",
+                stats.format_combined(),
+                active,
+                total_sessions,
+                chunks_in_flight,
+                pool_used_kib,
+                pool_limit_kib,
+                exclusive_tag,
+            );
+            resource_bar_clone.set_message(combined);
+
+            // update shared stats for profiling
+            #[cfg(feature = "heap-profiling")]
+            if let Ok(mut guard) = shared_stats_clone.lock() {
+                *guard = stats.clone();
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            // check if bar is finished (indicates main thread completed)
+            if resource_bar_clone.is_finished() {
+                break;
+            }
+        }
+        monitor.stop();
+    });
+
+    let mut pending_tasks = 0usize;
+
+    #[cfg(feature = "heap-profiling")]
+    let profiler_snapshot_interval = 50u64; // minimum file interval
+
+    #[cfg(feature = "heap-profiling")]
+    let mut last_snapshot_files = 0u64;
+
+    #[cfg(feature = "heap-profiling")]
+    let mut last_snapshot_memory_pct = 0.0f32;
+
+    #[cfg(feature = "heap-profiling")]
+    let memory_snapshot_thresholds = [25.0, 50.0, 75.0, 90.0, 95.0]; // memory % thresholds
+
+    // log sync start and enable resource monitor display
     tracing::info!(
-        "starting sync for paths: {:?}, with extensions: {:?}, git_only={}, honor_gitignore={}",
+        "starting sync for paths: {:?}, extensions: {:?}, git_only={}, honor_gitignore={}",
         args.paths,
         extensions,
         args.git_only,
         args.honor_gitignore
     );
-    eprintln!("debug: starting main sync loop");
-
-    let mut pending_tasks = 0usize;
+    display_stats.store(true, std::sync::atomic::Ordering::Relaxed);
 
     for candidate in candidates {
         drain_embedding_results(
@@ -1171,7 +1322,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                 );
                 let _ = state_store.mark_failed(&source_path, e.to_string());
                 let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
                 files_bar.set_message(files_message);
                 bytes_bar.set_message(bytes_message);
                 files_bar.inc(1);
@@ -1202,7 +1353,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                 );
                 let _ = state_store.mark_failed(&source_path, e.to_string());
                 let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = right_align_truncate(&display_name, bytes_message_width);
+                let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
                 files_bar.set_message(files_message);
                 bytes_bar.set_message(bytes_message);
                 files_bar.inc(1);
@@ -1223,6 +1374,9 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             continue;
         }
 
+        // calculate total chunk bytes for adaptive batch sizing
+        let total_chunk_bytes: usize = chunks.iter().map(|c| c.len()).sum();
+
         let mut task = EmbeddingTask {
             file_path: file_path.to_path_buf(),
             source_path: source_path.clone(),
@@ -1231,12 +1385,109 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             modified_at,
             file_hash: doc.file_hash.clone(),
             chunks,
+            total_chunk_bytes,
         };
 
         loop {
             match task_tx.try_send(task) {
                 Ok(()) => {
                     pending_tasks += 1;
+
+                    #[cfg(feature = "heap-profiling")]
+                    {
+                        let current_files = files_bar.position();
+                        let stats = shared_stats.lock().unwrap().clone();
+
+                        // calculate memory usage percentage
+                        let memory_pct = if stats.memory_total_mb > 0 {
+                            (stats.memory_used_mb as f32 / stats.memory_total_mb as f32) * 100.0
+                        } else {
+                            0.0
+                        };
+
+                        // determine if we should snapshot
+                        let should_snapshot = if current_files != last_snapshot_files {
+                            // interval-based: every N files
+                            let interval_trigger = current_files > 0 && current_files % profiler_snapshot_interval == 0;
+
+                            // memory-based: crossed a threshold since last snapshot
+                            let memory_trigger = memory_snapshot_thresholds.iter().any(|&threshold| {
+                                memory_pct >= threshold && last_snapshot_memory_pct < threshold
+                            });
+
+                            interval_trigger || memory_trigger
+                        } else {
+                            false
+                        };
+
+                        if should_snapshot {
+                            // drop and recreate profiler to write snapshot
+                            if let Ok(mut guard) = crate::profiler::PROFILER.lock() {
+                                let snapshot_reason = if memory_pct >= 90.0 {
+                                    "high memory pressure"
+                                } else if memory_pct >= 75.0 {
+                                    "elevated memory"
+                                } else if memory_pct >= 50.0 {
+                                    "moderate memory"
+                                } else if current_files % profiler_snapshot_interval == 0 {
+                                    "file interval"
+                                } else {
+                                    "memory threshold"
+                                };
+
+                                tracing::warn!(
+                                    files_processed = current_files,
+                                    memory_used_mb = stats.memory_used_mb,
+                                    memory_total_mb = stats.memory_total_mb,
+                                    memory_pct = format!("{:.1}%", memory_pct),
+                                    reason = snapshot_reason,
+                                    "writing heap snapshot"
+                                );
+
+                                // drop profiler (writes dhat-heap.json and prints summary to stderr)
+                                guard.take();
+
+                                // rename snapshot with timestamp and memory info
+                                let timestamp = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                let snapshot_name = format!(
+                                    "dhat-heap-{}-files-{:.0}pct-{}.json",
+                                    current_files,
+                                    memory_pct,
+                                    timestamp
+                                );
+
+                                if let Err(e) = std::fs::rename("dhat-heap.json", &snapshot_name) {
+                                    tracing::warn!("failed to rename snapshot: {}", e);
+                                } else {
+                                    tracing::info!("heap snapshot: {} (mem: {:.1}%)", snapshot_name, memory_pct);
+                                }
+
+                                // create new profiler to continue tracking
+                                *guard = Some(dhat::Profiler::new_heap());
+
+                                last_snapshot_files = current_files;
+                                last_snapshot_memory_pct = memory_pct;
+                            }
+                        }
+                    }
+
+                    // periodic bm25 index flushing for data safety
+                    let current_files = files_bar.position();
+                    const BM25_FLUSH_INTERVAL: u64 = 100;
+                    if current_files > 0 && current_files % BM25_FLUSH_INTERVAL == 0 {
+                        tracing::info!(
+                            "periodic bm25 flush: {} docs at {} files",
+                            bm25_index.num_docs(),
+                            current_files
+                        );
+                        if let Err(e) = save_index(&bm25_index, &config.bm25_index_path) {
+                            tracing::warn!("periodic bm25 flush failed: {}", e);
+                        }
+                    }
+
                     break;
                 }
                 Err(mpsc::TrySendError::Full(returned_task)) => {
@@ -1305,6 +1556,10 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     files_bar.finish_with_message("done");
     bytes_bar.finish_with_message("done");
+    resource_bar.finish_and_clear();
+
+    // wait for resource monitor thread to finish
+    let _ = resource_update_handle.join();
 
     // save bm25 index
     tracing::info!("saving bm25 index with {} documents", bm25_index.num_docs());
@@ -1312,25 +1567,29 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         tracing::error!("failed to save bm25 index: {}", e);
     }
 
-    eprintln!("debug: document sync complete, checking if commits flag is set");
-    eprintln!("debug: args.commits = {}", args.commits);
-
     // index git commits if requested
     if args.commits {
-        eprintln!("debug: starting commit indexing");
         tracing::info!("indexing git commits");
         let mut commit_embedder =
             OnnxEmbedder::new(&model_path, model_info.clone(), embedding_provider)?;
         if let Err(e) = sync_commits(&args, &config, &qdrant_client, &mut commit_embedder).await {
             tracing::error!("failed to index commits: {}", e);
         }
-        eprintln!("debug: commit indexing complete");
     }
 
     tracing::info!("sync completed");
     let _ = log_tx.send("__bbt_log_close__".to_string());
     drop(log_tx);
     let _ = log_thread.join();
+
+    // write final heap snapshot after all progress bars are closed
+    #[cfg(feature = "heap-profiling")]
+    {
+        if let Ok(mut guard) = crate::profiler::PROFILER.lock() {
+            guard.take(); // drops profiler, writes dhat-heap.json and prints to stderr
+        }
+    }
+
     Ok(())
 }
 
@@ -1381,13 +1640,10 @@ async fn sync_commits(
     for path in &args.paths {
         if path.is_dir() {
             // recursively find all repos in directory (max depth 10)
-            eprintln!("debug: recursively scanning {} for git repositories", path.display());
             let repos = find_git_repos_recursive(path, 10);
-            eprintln!("debug: found {} repositories in {}", repos.len(), path.display());
             for repo_path in repos {
                 if !repo_paths.contains(&repo_path) {
                     repo_paths.push(repo_path.clone());
-                    eprintln!("debug:   - {}", repo_path.display());
                 }
             }
         } else {
@@ -1400,7 +1656,6 @@ async fn sync_commits(
         }
     }
 
-    eprintln!("debug: total: found {} git repositories for commit indexing", repo_paths.len());
     tracing::info!("found {} git repositories for commit indexing", repo_paths.len());
 
     let mut total_commits = 0;
@@ -1980,6 +2235,31 @@ fn get_repo_name(repo_root: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string()
+}
+
+fn format_filesize_message(bytes: u64, width: usize) -> String {
+    use indicatif::HumanBytes;
+    let size_str = format!("{}", HumanBytes(bytes));
+    right_align_truncate(&size_str, width)
+}
+
+/// Format bytes as fixed-width compact string (5 chars): " 1.2g", "  46k", " 512b"
+fn format_bytes_short(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * 1024;
+    const GIB: usize = 1024 * 1024 * 1024;
+
+    let s = if bytes >= GIB {
+        format!("{:.1}g", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1}m", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{}k", bytes / KIB)
+    } else {
+        format!("{}b", bytes)
+    };
+    // fixed 5-char width, right-aligned
+    format!("{:>5}", s)
 }
 
 fn right_align_truncate(value: &str, width: usize) -> String {
@@ -2591,7 +2871,7 @@ fn hash_label(value: &str) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
-    if let Ok(secret) = std::env::var("BBT_CITATION_SECRET") {
+    if let Ok(secret) = std::env::var("QUERY_CITATION_SECRET") {
         if !secret.is_empty() {
             hasher.update(secret.as_bytes());
         }

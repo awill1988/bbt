@@ -48,13 +48,18 @@ impl ExecutionProvider {
     }
 }
 
+fn read_bool_env(keys: &[&str]) -> bool {
+    for key in keys {
+        if let Ok(value) = env::var(key) {
+            let value = value.to_lowercase();
+            return value == "1" || value == "true" || value == "yes";
+        }
+    }
+    false
+}
+
 fn is_force_cpu() -> bool {
-    env::var("BBT_FORCE_CPU")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
+    read_bool_env(&["FORCE_CPU"])
 }
 
 /// onnx-based cross-encoder reranker

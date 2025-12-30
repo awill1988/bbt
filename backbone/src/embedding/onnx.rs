@@ -1,7 +1,7 @@
 use crate::embedding::models::EmbeddingModelInfo;
 use crate::error::{BbtError, Result};
 use ort::execution_providers::{
-    CoreMLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider,
+    ArenaExtendStrategy, CoreMLExecutionProvider, CPUExecutionProvider, CUDAExecutionProvider,
     ExecutionProvider as OrtExecutionProvider,
 };
 use ort::session::builder::GraphOptimizationLevel;
@@ -9,6 +9,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use std::env;
 use std::path::Path;
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 /// ONNX execution provider
@@ -63,34 +64,67 @@ impl ExecutionProvider {
     }
 }
 
+fn read_bool_env(keys: &[&str]) -> bool {
+    for key in keys {
+        if let Ok(value) = env::var(key) {
+            let value = value.to_lowercase();
+            return value == "1" || value == "true" || value == "yes";
+        }
+    }
+    false
+}
+
 fn is_force_cpu() -> bool {
-    env::var("BBT_FORCE_CPU")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
+    read_bool_env(&["FORCE_CPU"])
+}
+
+/// Query CUDA GPU free memory in MiB using nvidia-smi
+fn query_cuda_free_memory() -> Option<u64> {
+    let nvidia_smi_paths = ["/usr/bin/nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi"];
+
+    for path in nvidia_smi_paths {
+        let output = std::process::Command::new(path)
+            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    if let Some(line) = stdout.lines().next() {
+                        if let Ok(free_mb) = line.trim().parse::<u64>() {
+                            return Some(free_mb);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// ONNX-based embedding generator
 pub struct OnnxEmbedder {
     session: Session,
-    tokenizer: Tokenizer,
+    tokenizer: Arc<Tokenizer>,
     model_info: EmbeddingModelInfo,
     provider: ExecutionProvider,
 }
 
 impl OnnxEmbedder {
-    /// Create a new ONNX embedder
+    /// Create a new ONNX embedder with a shared tokenizer
     ///
     /// # Arguments
     /// * `model_path` - Path to the ONNX model file
     /// * `model_info` - Model metadata
     /// * `provider` - Execution provider to use
-    pub fn new<P: AsRef<Path>>(
+    /// * `tokenizer` - Shared tokenizer instance
+    /// * `session_count` - Total number of sessions sharing VRAM (for memory limit calculation)
+    pub fn new_with_shared_tokenizer<P: AsRef<Path>>(
         model_path: P,
         model_info: EmbeddingModelInfo,
         provider: ExecutionProvider,
+        tokenizer: Arc<Tokenizer>,
+        session_count: usize,
     ) -> Result<Self> {
         let model_path = model_path.as_ref();
 
@@ -113,46 +147,80 @@ impl OnnxEmbedder {
             .map_err(|e| BbtError::Model(format!("failed to set inter threads: {}", e)))?;
 
         let session_builder = match provider {
-            ExecutionProvider::Cuda => session_builder
-                .with_execution_providers([
-                    CUDAExecutionProvider::default().build(),
-                    CPUExecutionProvider::default().build(),
-                ])
-                .map_err(|e| {
-                    BbtError::Model(format!("failed to set execution providers: {}", e))
-                })?,
-            ExecutionProvider::Coreml => session_builder
-                .with_execution_providers([
-                    CoreMLExecutionProvider::default().build(),
-                    CPUExecutionProvider::default().build(),
-                ])
-                .map_err(|e| {
-                    BbtError::Model(format!("failed to set execution providers: {}", e))
-                })?,
-            ExecutionProvider::Cpu => session_builder
-                .with_execution_providers([CPUExecutionProvider::default().build()])
-                .map_err(|e| {
-                    BbtError::Model(format!("failed to set execution providers: {}", e))
-                })?,
+            ExecutionProvider::Cuda => {
+                // query available vram and set memory limit to 75% of free / session count
+                // fallback to 4 GiB if detection fails
+                let sessions = session_count.max(1) as f64;
+                let memory_limit = query_cuda_free_memory()
+                    .map(|free_mb| {
+                        // divide 75% of free vram among sessions
+                        let per_session_mb = (free_mb as f64 * 0.75 / sessions) as usize;
+                        let limit_mb = per_session_mb.clamp(512, 8192); // 512 MiB - 8 GiB
+                        tracing::info!(
+                            "cuda vram: {}mb free, {} sessions, {}mb per session limit",
+                            free_mb,
+                            session_count,
+                            limit_mb
+                        );
+                        limit_mb * 1024 * 1024
+                    })
+                    .unwrap_or(4 * 1024 * 1024 * 1024); // 4 GiB fallback
+
+                // use NextPowerOfTwo for faster allocation (pre-allocates more aggressively)
+                let cuda_ep = CUDAExecutionProvider::default()
+                    .with_memory_limit(memory_limit)
+                    .with_arena_extend_strategy(ArenaExtendStrategy::NextPowerOfTwo)
+                    .build();
+
+                // disable cpu memory arena to prevent massive memory pre-allocation
+                let cpu_ep = CPUExecutionProvider::default()
+                    .with_arena_allocator(false)
+                    .build();
+
+                session_builder
+                    .with_execution_providers([cuda_ep, cpu_ep])
+                    .map_err(|e| {
+                        BbtError::Model(format!("failed to set execution providers: {}", e))
+                    })?
+            },
+            ExecutionProvider::Coreml => {
+                // disable cpu memory arena to prevent massive memory pre-allocation
+                let cpu_ep = CPUExecutionProvider::default()
+                    .with_arena_allocator(false)
+                    .build();
+
+                session_builder
+                    .with_execution_providers([
+                        CoreMLExecutionProvider::default().build(),
+                        cpu_ep,
+                    ])
+                    .map_err(|e| {
+                        BbtError::Model(format!("failed to set execution providers: {}", e))
+                    })?
+            },
+            ExecutionProvider::Cpu => {
+                // disable cpu memory arena to prevent massive memory pre-allocation
+                let cpu_ep = CPUExecutionProvider::default()
+                    .with_arena_allocator(false)
+                    .build();
+
+                session_builder
+                    .with_execution_providers([cpu_ep])
+                    .map_err(|e| {
+                        BbtError::Model(format!("failed to set execution providers: {}", e))
+                    })?
+            },
         };
 
         let session = session_builder
             .commit_from_file(model_path)
             .map_err(|e| BbtError::Model(format!("failed to load model from {:?}: {}", model_path, e)))?;
 
-        // load tokenizer (expects tokenizer.json in same directory as model)
-        let tokenizer_path = model_path.parent()
-            .ok_or_else(|| BbtError::Model("invalid model path".to_string()))?
-            .join("tokenizer.json");
-
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| BbtError::Model(format!("failed to load tokenizer from {:?}: {}", tokenizer_path, e)))?;
-
         tracing::info!(
             model = %model_info.repo_id,
             provider = %provider.as_str(),
             dimensions = model_info.dimensions,
-            "initialized onnx embedder"
+            "initialized onnx embedder with shared tokenizer"
         );
         tracing::info!("embedding provider: {}", provider.as_str());
 
@@ -162,6 +230,33 @@ impl OnnxEmbedder {
             model_info,
             provider,
         })
+    }
+
+    /// Create a new ONNX embedder
+    ///
+    /// # Arguments
+    /// * `model_path` - Path to the ONNX model file
+    /// * `model_info` - Model metadata
+    /// * `provider` - Execution provider to use
+    pub fn new<P: AsRef<Path>>(
+        model_path: P,
+        model_info: EmbeddingModelInfo,
+        provider: ExecutionProvider,
+    ) -> Result<Self> {
+        let model_path = model_path.as_ref();
+
+        // load tokenizer (expects tokenizer.json in same directory as model)
+        let tokenizer_path = model_path.parent()
+            .ok_or_else(|| BbtError::Model("invalid model path".to_string()))?
+            .join("tokenizer.json");
+
+        let tokenizer = Arc::new(
+            Tokenizer::from_file(&tokenizer_path)
+                .map_err(|e| BbtError::Model(format!("failed to load tokenizer from {:?}: {}", tokenizer_path, e)))?
+        );
+
+        // standalone session, assume single session for memory calculation
+        Self::new_with_shared_tokenizer(model_path, model_info, provider, tokenizer, 1)
     }
 
     /// Generate embeddings for a batch of texts
@@ -182,9 +277,10 @@ impl OnnxEmbedder {
             "generating embeddings"
         );
 
-        // tokenize all texts
+        // tokenize all texts (avoid cloning by converting to borrowed slices)
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let encodings = self.tokenizer
-            .encode_batch(texts.to_vec(), true)
+            .encode_batch(text_refs, true)
             .map_err(|e| BbtError::Embedding(format!("tokenization failed: {}", e)))?;
 
         // prepare input tensors
@@ -412,7 +508,7 @@ mod tests {
         temp_file.flush()?;
 
         let model_info = EmbeddingModelInfo::default_model();
-        let embedder = OnnxEmbedder::new(
+        let mut embedder = OnnxEmbedder::new(
             temp_file.path(),
             model_info,
             ExecutionProvider::Cpu,
@@ -431,7 +527,7 @@ mod tests {
         temp_file.flush()?;
 
         let model_info = EmbeddingModelInfo::default_model();
-        let embedder = OnnxEmbedder::new(
+        let mut embedder = OnnxEmbedder::new(
             temp_file.path(),
             model_info,
             ExecutionProvider::Cpu,

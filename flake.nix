@@ -128,22 +128,22 @@
           ];
 
           shellHook = ''
-            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zlib}/lib:${pkgs.openssl.out}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # avoid leaking nix libs into host binaries like /bin/ssh
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.zlib.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
             export LOG_LEVEL="''${LOG_LEVEL:-info}"
-            export BBT_ENABLE_TRACING="''${BBT_ENABLE_TRACING:-true}"
-            export BBT_VECTOR_STORE_TYPE="''${BBT_VECTOR_STORE_TYPE:-qdrant}"
-            export BBT_QDRANT_URL="''${BBT_QDRANT_URL:-http://localhost:6334}"
-            export BBT_STATE_STORE_PATH="''${BBT_STATE_STORE_PATH:-./data/state.db}"
-            export BBT_RETRIEVAL_MODE="''${BBT_RETRIEVAL_MODE:-hybrid}"
-            export BBT_TOP_K="''${BBT_TOP_K:-5}"
-            export BBT_VECTOR_WEIGHT="''${BBT_VECTOR_WEIGHT:-0.5}"
-            export BBT_BM25_WEIGHT="''${BBT_BM25_WEIGHT:-0.5}"
-            export BBT_MIN_SCORE="''${BBT_MIN_SCORE:-0.5}"
-            export BBT_CHUNK_SIZE="''${BBT_CHUNK_SIZE:-512}"
-            export BBT_CHUNK_OVERLAP="''${BBT_CHUNK_OVERLAP:-128}"
-            export BBT_FORCE_SYNC="''${BBT_FORCE_SYNC:-false}"
-            export BBT_RESET_STATE="''${BBT_RESET_STATE:-false}"
+            export ENABLE_TRACING="''${ENABLE_TRACING:-true}"
+            export VECTOR_STORE_TYPE="''${VECTOR_STORE_TYPE:-qdrant}"
+            export QDRANT_URL="''${QDRANT_URL:-http://localhost:6334}"
+            export STATE_STORE_PATH="''${STATE_STORE_PATH:-./data/state.db}"
+            export RETRIEVAL_MODE="''${RETRIEVAL_MODE:-hybrid}"
+            export TOP_K="''${TOP_K:-5}"
+            export VECTOR_WEIGHT="''${VECTOR_WEIGHT:-0.5}"
+            export BM25_WEIGHT="''${BM25_WEIGHT:-0.5}"
+            export MIN_SCORE="''${MIN_SCORE:-0.5}"
+            export CHUNK_SIZE="''${CHUNK_SIZE:-512}"
+            export CHUNK_OVERLAP="''${CHUNK_OVERLAP:-128}"
+            export SYNC_FORCE="''${SYNC_FORCE:-false}"
+            export SYNC_RESET_STATE="''${SYNC_RESET_STATE:-false}"
 
             # enable wsl nvidia gpu driver libraries when running under wsl
             if [ -d /usr/lib/wsl/lib ]; then

@@ -59,7 +59,8 @@
         bbt-script = pkgs.writeShellScriptBin "bbt" (''
           set -e
         '' + lib.optionalString (!isDarwin) ''
-          export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.cudaPackages.cuda_cudart}/lib:${pkgs.cudaPackages.libcublas}/lib:${pkgs.cudaPackages.libcufft}/lib:${pkgs.cudaPackages.cudnn}/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH"
+          ORT_LIB_DIR=$(find ~/.cache/dfbin -name "libonnxruntime_providers_shared.so" -printf '%h\n' 2>/dev/null | head -1)
+          export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.cudaPackages.cuda_cudart}/lib:${pkgs.cudaPackages.libcublas.lib}/lib:${pkgs.cudaPackages.libcufft.lib}/lib:${pkgs.cudaPackages.cudnn.lib}/lib''${ORT_LIB_DIR:+:$ORT_LIB_DIR}:/usr/lib/wsl/lib:$LD_LIBRARY_PATH"
         '' + ''
           exec ${rustToolchain}/bin/cargo run --bin bbt --features ${if isDarwin then "coreml" else "cuda"} -- "$@"
         '');
@@ -120,9 +121,9 @@
             gcc
             cudaPackages.cudatoolkit
             cudaPackages.cuda_cudart
-            cudaPackages.libcublas
-            cudaPackages.libcufft
-            cudaPackages.cudnn
+            cudaPackages.libcublas.lib
+            cudaPackages.libcufft.lib
+            cudaPackages.cudnn.lib
           ]);
 
           packages = [
@@ -158,8 +159,12 @@
               export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$LD_LIBRARY_PATH"
             fi
           '' + lib.optionalString (!isDarwin) ''
-            # add cuda, cudnn, and c++ stdlib to path for onnxruntime
-            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.cudaPackages.cuda_cudart}/lib:${pkgs.cudaPackages.libcublas}/lib:${pkgs.cudaPackages.libcufft}/lib:${pkgs.cudaPackages.cudnn}/lib:$LD_LIBRARY_PATH"
+            # add ort downloaded binaries to library path (for cuda provider)
+            ORT_LIB_DIR=$(find ~/.cache/dfbin -name "libonnxruntime_providers_shared.so" -printf '%h\n' 2>/dev/null | head -1)
+
+            # add cuda, cudnn, c++ stdlib, and ort libs to path for onnxruntime
+            # cuda libs must be findable when ort loads its cuda provider
+            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.cudaPackages.cuda_cudart}/lib:${pkgs.cudaPackages.libcublas.lib}/lib:${pkgs.cudaPackages.libcufft.lib}/lib:${pkgs.cudaPackages.cudnn.lib}/lib''${ORT_LIB_DIR:+:$ORT_LIB_DIR}:$LD_LIBRARY_PATH"
           '' + ''
             # ensure required directories exist
             mkdir -p .cache data

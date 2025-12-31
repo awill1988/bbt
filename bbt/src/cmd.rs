@@ -100,102 +100,57 @@ pub struct SyncCommand {
 
 #[derive(Args)]
 pub struct QueryCommand {
-    /// Query text
-    #[clap(long)]
+    /// Search query
     query: String,
 
-    /// Override top k results
-    #[clap(long)]
-    top_k: Option<usize>,
+    /// Number of results
+    #[clap(short = 'k', long, default_value = "5")]
+    top_k: usize,
 
-    /// Retrieval mode override
-    #[clap(long, value_enum)]
-    mode: Option<QueryMode>,
+    /// Retrieval mode
+    #[clap(short, long, value_enum, default_value = "hybrid")]
+    mode: QueryMode,
+
+    /// Output format
+    #[clap(short, long, value_enum, default_value = "text")]
+    format: OutputFormat,
+
+    /// Show scores and debug info
+    #[clap(short, long)]
+    verbose: bool,
+
+    /// Output as JSON (shorthand for --format json)
+    #[clap(long)]
+    json: bool,
 
     /// Filter by source path prefix
     #[clap(long)]
-    source_prefix: Option<String>,
+    source: Option<String>,
 
-    /// Citation redaction mode
-    #[clap(long, value_enum, default_value = "full")]
-    citation_mode: CitationMode,
-
-    /// Output format
-    #[clap(long, value_enum, default_value = "text")]
-    format: OutputFormat,
-
-    /// Wrap width for text output
-    #[clap(long, default_value_t = 100)]
-    wrap_width: usize,
-
-    /// Show scores in text output
-    #[clap(long, default_value = "false")]
-    show_scores: bool,
-
+    // --- Commit options ---
     /// Query commits instead of documents
-    #[clap(long, default_value = "false")]
+    #[clap(long)]
     commits: bool,
 
-    /// Filter by commit classification (feat, fix, refactor, docs, test, chore, style, perf, ci, build, revert)
-    #[clap(long)]
+    /// Filter by commit type (feat, fix, refactor, docs, test, chore)
+    #[clap(long = "type")]
     commit_type: Option<String>,
 
     /// Filter by author email
     #[clap(long)]
     author: Option<String>,
 
-    /// Filter commits since this date (ISO 8601: YYYY-MM-DD)
+    /// Filter since date (YYYY-MM-DD)
     #[clap(long)]
     since: Option<String>,
 
-    /// Filter commits until this date (ISO 8601: YYYY-MM-DD)
+    /// Filter until date (YYYY-MM-DD)
     #[clap(long)]
     until: Option<String>,
 
-    /// Recency weight for hybrid scoring (0.0 = pure semantic, 1.0 = pure recency)
-    #[clap(long, default_value = "0.0")]
-    recency_weight: f32,
-
-    /// Time decay function for recency scoring
-    #[clap(long, value_enum, default_value = "exponential")]
-    time_decay: TimeDecay,
-
-    /// Sort order for results
-    #[clap(long, value_enum, default_value = "score")]
-    sort_by: SortBy,
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum SortBy {
-    /// Sort by relevance score (default)
-    Score,
-    /// Sort by date, oldest first
-    DateAsc,
-    /// Sort by date, newest first
-    DateDesc,
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum TimeDecay {
-    /// Sharp dropoff: e^(-0.1 * days)
-    Exponential,
-    /// Gradual: 1 - (days / 365)
-    Linear,
-    /// Smooth: 1 / (1 + log(days + 1))
-    Logarithmic,
-}
-
-impl TimeDecay {
-    fn calculate_score(self, days_old: f64) -> f32 {
-        match self {
-            // exponential: e^(-λ * days) where λ = 0.01 (half-life ~70 days)
-            Self::Exponential => (-0.01 * days_old).exp() as f32,
-            // linear: 1 - (days / 365), clamped to [0, 1]
-            Self::Linear => (1.0 - (days_old / 365.0)).max(0.0) as f32,
-            // logarithmic: 1 / (1 + log(days + 1))
-            Self::Logarithmic => (1.0 / (1.0 + (days_old + 1.0).ln())) as f32,
-        }
-    }
+    /// Sort by date (newest first) instead of score
+    #[clap(long)]
+    date_sort: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -689,6 +644,15 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     let term = Term::stderr();
     let term_width = usize::from(term.size().1);
+
+    // set up scrolling log region (logs scroll below, progress bars stay at top)
+    // header: 4 lines for progress bars (scan, resource, files, bytes)
+    let scrolling_log_guard = crate::terminal_layout::setup_scrolling_logs(4)
+        .map_err(|e| anyhow!("failed to set up terminal layout: {}", e))?;
+    let log_tx = scrolling_log_guard.log_sender();
+
+    let _guard = init_tracing("bbt", Some(log_tx.clone()))?;
+
     let progress = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
     progress.set_move_cursor(true);
     let scan_bar = progress.add(ProgressBar::new_spinner());
@@ -698,26 +662,6 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     );
     scan_bar.set_prefix("scan");
     scan_bar.enable_steady_tick(std::time::Duration::from_millis(120));
-
-    let log_bar = progress.add(ProgressBar::new(0));
-    log_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
-    log_bar.set_prefix("log");
-    log_bar.set_message("ready");
-
-    let log_message_width = log_message_width(term_width, log_bar.prefix().len());
-    let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
-    let log_bar_handle = log_bar.clone();
-    let log_thread = std::thread::spawn(move || {
-        while let Ok(line) = log_rx.recv() {
-            if line == "__bbt_log_close__" {
-                break;
-            }
-            let message = truncate_log_line(&line, log_message_width);
-            log_bar_handle.set_message(message);
-        }
-    });
-
-    let _guard = init_tracing("bbt", Some(log_tx.clone()))?;
 
     let scan_scope_key = build_scan_scope_key(&args, &extensions);
     let scan_message_width = scan_message_width(term_width, scan_bar.prefix().len());
@@ -882,13 +826,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     let total_bytes = scan_totals.bytes;
 
     // create resource monitor bar
-    let resource_bar = progress.insert_before(&log_bar, ProgressBar::new_spinner());
+    let resource_bar = progress.add(ProgressBar::new_spinner());
     let resource_style = ProgressStyle::with_template("{spinner:.green} {msg}")?;
     resource_bar.set_style(resource_style);
     resource_bar.enable_steady_tick(std::time::Duration::from_millis(500));
 
-    let files_bar = progress.insert_before(&log_bar, ProgressBar::new(total_files));
-    let bytes_bar = progress.insert_before(&log_bar, ProgressBar::new(total_bytes));
+    let files_bar = progress.add(ProgressBar::new(total_files));
+    let bytes_bar = progress.add(ProgressBar::new(total_bytes));
 
     let files_style = ProgressStyle::with_template(
         "{prefix} [{bar:40.cyan/blue}] {pos}/{len} {msg}",
@@ -1578,9 +1522,8 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     }
 
     tracing::info!("sync completed");
-    let _ = log_tx.send("__bbt_log_close__".to_string());
-    drop(log_tx);
-    let _ = log_thread.join();
+
+    // scrolling_log_guard cleanup is handled by Drop
 
     // write final heap snapshot after all progress bars are closed
     #[cfg(feature = "heap-profiling")]
@@ -2052,41 +1995,6 @@ fn build_scan_scope_key(args: &SyncCommand, extensions: &[String]) -> String {
     )
 }
 
-fn log_message_width(term_width: usize, prefix_len: usize) -> usize {
-    let left_width = prefix_len.saturating_add(1);
-    term_width.saturating_sub(left_width).saturating_sub(1)
-}
-
-fn truncate_log_line(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let value_chars: Vec<char> = value.chars().collect();
-    if value_chars.len() <= width {
-        return pad_right(value, width);
-    }
-    if width <= 3 {
-        return ".".repeat(width);
-    }
-    let available = width - 3;
-    let prefix_len = (available + 1) / 2;
-    let suffix_len = available - prefix_len;
-    let prefix = value_chars[..prefix_len].iter().collect::<String>();
-    let suffix = value_chars[value_chars.len() - suffix_len..]
-        .iter()
-        .collect::<String>();
-    pad_right(&format!("{prefix}...{suffix}"), width)
-}
-
-fn pad_right(value: &str, width: usize) -> String {
-    let length = value.chars().count();
-    if length >= width {
-        value.to_string()
-    } else {
-        format!("{}{}", value, " ".repeat(width - length))
-    }
-}
-
 fn progress_message_width(
     term_width: usize,
     prefix_len: usize,
@@ -2298,18 +2206,18 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
     use backbone::retrieval::{Bm25Scorer, FusionStrategy, fuse_results};
     use backbone::retrieval::bm25::load_index;
     use backbone::tracing::init_tracing;
-    use qdrant_client::qdrant::SearchPointsBuilder;
+    use qdrant_client::qdrant::{GetPointsBuilder, SearchPointsBuilder};
     use qdrant_client::Qdrant;
 
     let _guard = init_tracing("bbt", None)?;
     let mut config = BbtConfig::from_env()?;
 
-    if let Some(mode) = args.mode {
-        config.retrieval_mode = mode.into();
-    }
-    if let Some(top_k) = args.top_k {
-        config.top_k = top_k;
-    }
+    // apply CLI overrides
+    config.retrieval_mode = args.mode.into();
+    config.top_k = args.top_k;
+
+    // handle --json shorthand
+    let output_format = if args.json { OutputFormat::Json } else { args.format };
 
     // force vector mode for commit queries (no bm25 index for commits)
     if args.commits && config.retrieval_mode != RetrievalMode::Vector {
@@ -2320,10 +2228,6 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
     let query = args.query.trim();
     if query.is_empty() {
         anyhow::bail!("query is required");
-    }
-
-    if config.top_k == 0 {
-        anyhow::bail!("top_k must be greater than 0");
     }
 
     // load bm25 index if needed
@@ -2414,8 +2318,8 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
                     .get("source")
                     .and_then(|value| value_as_string(value));
                 let citation_raw = format_citation(source_raw.as_deref());
-                let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
-                let source = display_source(source_raw.as_deref(), args.citation_mode);
+                let citation = display_citation(&citation_raw, source_raw.as_deref(), CitationMode::Full);
+                let source = display_source(source_raw.as_deref(), CitationMode::Full);
                 let id = point_id_to_string(point.id);
 
                 // extract metadata (commit-specific or general)
@@ -2471,66 +2375,21 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
                 });
             }
 
-            // apply hybrid scoring for commits
-            if args.commits && args.recency_weight > 0.0 {
+            // sort results
+            if args.commits && args.date_sort {
+                // sort commits by date (newest first)
                 use chrono::Utc;
-                let now = Utc::now();
-
-                for result in &mut results {
-                    if let Some(commit_time_str) = result.metadata.get("commit_time") {
-                        // parse commit time
-                        if let Ok(commit_time) = chrono::DateTime::parse_from_rfc3339(commit_time_str) {
-                            let commit_time_utc = commit_time.with_timezone(&Utc);
-                            let age = now.signed_duration_since(commit_time_utc);
-                            let days_old = age.num_days() as f64;
-
-                            // calculate time decay score
-                            let time_score = args.time_decay.calculate_score(days_old);
-
-                            // hybrid score: (1-w) * semantic + w * recency
-                            let semantic_score = result.score;
-                            result.score = (1.0 - args.recency_weight) * semantic_score
-                                + args.recency_weight * time_score;
-                        }
-                    }
-                }
-            }
-
-            // sort results based on sort_by parameter
-            if args.commits {
-                use chrono::Utc;
-                match args.sort_by {
-                    SortBy::Score => {
-                        // default: sort by score descending (highest first)
-                        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                    }
-                    SortBy::DateAsc => {
-                        // oldest first
-                        results.sort_by(|a, b| {
-                            let a_time = a.metadata.get("commit_time")
-                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                .map(|dt| dt.with_timezone(&Utc));
-                            let b_time = b.metadata.get("commit_time")
-                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                .map(|dt| dt.with_timezone(&Utc));
-                            a_time.cmp(&b_time)
-                        });
-                    }
-                    SortBy::DateDesc => {
-                        // newest first
-                        results.sort_by(|a, b| {
-                            let a_time = a.metadata.get("commit_time")
-                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                .map(|dt| dt.with_timezone(&Utc));
-                            let b_time = b.metadata.get("commit_time")
-                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                .map(|dt| dt.with_timezone(&Utc));
-                            b_time.cmp(&a_time)
-                        });
-                    }
-                }
+                results.sort_by(|a, b| {
+                    let a_time = a.metadata.get("commit_time")
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+                    let b_time = b.metadata.get("commit_time")
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+                    b_time.cmp(&a_time)
+                });
             } else {
-                // for documents, always sort by score
+                // default: sort by score descending
                 results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
             }
 
@@ -2545,31 +2404,82 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
 
             tracing::info!("bm25 returned {} results", bm25_results.len());
 
-            // convert bm25 results to QueryResultOutput format
-            bm25_results
-                .into_iter()
-                .map(|result| {
-                    let source_raw = index
-                        .get_document(&result.doc_id)
-                        .and_then(|_doc| {
-                            // extract source from chunk_text metadata if available
-                            // for now, use doc_id as fallback
-                            Some(result.doc_id.clone())
-                        });
-                    let citation_raw = format_citation(source_raw.as_deref());
-                    let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
-                    let source = display_source(source_raw.as_deref(), args.citation_mode);
+            if bm25_results.is_empty() {
+                Vec::new()
+            } else {
+                // fetch text and source from qdrant for bm25 results
+                let qdrant_client = if let Some(api_key) = &config.qdrant_api_key {
+                    Qdrant::from_url(&config.qdrant_url)
+                        .api_key(api_key.clone())
+                        .timeout(std::time::Duration::from_secs(60))
+                        .build()?
+                } else {
+                    Qdrant::from_url(&config.qdrant_url)
+                        .timeout(std::time::Duration::from_secs(60))
+                        .build()?
+                };
 
-                    QueryResultOutput {
-                        id: result.doc_id,
-                        score: result.score,
-                        text: result.text,
-                        citation,
-                        source,
-                        metadata: std::collections::HashMap::new(),
-                    }
-                })
-                .collect()
+                let collection_name = "bbt".to_string();
+                let point_ids: Vec<qdrant_client::qdrant::PointId> = bm25_results
+                    .iter()
+                    .map(|r| qdrant_client::qdrant::PointId::from(r.doc_id.clone()))
+                    .collect();
+
+                let get_response = qdrant_client
+                    .get_points(
+                        GetPointsBuilder::new(collection_name, point_ids)
+                            .with_payload(true),
+                    )
+                    .await?;
+
+                // build lookup map from qdrant response
+                let payload_map: std::collections::HashMap<String, (String, String)> = get_response
+                    .result
+                    .into_iter()
+                    .map(|point| {
+                        let id = point_id_to_string(point.id);
+                        let text = point
+                            .payload
+                            .get("text")
+                            .and_then(|v| value_as_string(v))
+                            .unwrap_or_default();
+                        let source = point
+                            .payload
+                            .get("source")
+                            .and_then(|v| value_as_string(v))
+                            .unwrap_or_default();
+                        (id, (text, source))
+                    })
+                    .collect();
+
+                // convert bm25 results with fetched text
+                bm25_results
+                    .into_iter()
+                    .map(|result| {
+                        let (text, source_path) = payload_map
+                            .get(&result.doc_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let source_raw = if source_path.is_empty() {
+                            Some(result.doc_id.clone())
+                        } else {
+                            Some(source_path)
+                        };
+                        let citation_raw = format_citation(source_raw.as_deref());
+                        let citation = display_citation(&citation_raw, source_raw.as_deref(), CitationMode::Full);
+                        let source = display_source(source_raw.as_deref(), CitationMode::Full);
+
+                        QueryResultOutput {
+                            id: result.doc_id,
+                            score: result.score,
+                            text,
+                            citation,
+                            source,
+                            metadata: std::collections::HashMap::new(),
+                        }
+                    })
+                    .collect()
+            }
         }
         RetrievalMode::Hybrid => {
             tracing::info!("hybrid search (vector + bm25) with top_k={}", initial_limit);
@@ -2596,6 +2506,19 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("failed to embed query"))?;
 
+            // debug: show embedding provider and sample values
+            if args.verbose {
+                let norm: f32 = query_vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let first_5: Vec<f32> = query_vector.iter().take(5).cloned().collect();
+                let last_5: Vec<f32> = query_vector.iter().rev().take(5).rev().cloned().collect();
+                println!("\n=== debug: query embedding ===");
+                println!("provider: {}", embedder.provider().as_str());
+                println!("dimensions: {}", query_vector.len());
+                println!("l2 norm: {:.6} (should be ~1.0 for normalized)", norm);
+                println!("first 5 values: {:?}", first_5);
+                println!("last 5 values: {:?}", last_5);
+            }
+
             let collection_name = "bbt".to_string();
             let collection_exists = qdrant_client
                 .collection_exists(&collection_name)
@@ -2615,7 +2538,8 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
 
             let response = qdrant_client.search_points(search_builder).await?;
 
-            // convert vector results
+            // convert vector results and build source map in single pass
+            let mut vector_source_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             let vector_results: Vec<(String, f32, String)> = response
                 .result
                 .into_iter()
@@ -2626,6 +2550,12 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
                         .get("text")
                         .and_then(|value| value_as_string(value))
                         .unwrap_or_default();
+                    let source = point
+                        .payload
+                        .get("source")
+                        .and_then(|value| value_as_string(value))
+                        .unwrap_or_default();
+                    vector_source_map.insert(id.clone(), source);
                     (id, point.score, text)
                 })
                 .collect();
@@ -2641,28 +2571,212 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
                 bm25_results.len()
             );
 
+            // debug: show raw scores and overlap analysis
+            if args.verbose {
+                println!("\n=== debug: raw vector scores ===");
+                for (i, (id, score, text)) in vector_results.iter().take(5).enumerate() {
+                    let text_preview: String = text.chars().take(50).collect();
+                    println!("  {}: score={:.4} id={} text=\"{}...\"", i + 1, score, &id[..8.min(id.len())], text_preview);
+                }
+                if vector_results.len() > 5 {
+                    println!("  ... and {} more", vector_results.len() - 5);
+                }
+
+                println!("\n=== debug: raw bm25 scores ===");
+                for (i, result) in bm25_results.iter().take(5).enumerate() {
+                    println!("  {}: score={:.4} id={}", i + 1, result.score, &result.doc_id[..8.min(result.doc_id.len())]);
+                }
+                if bm25_results.len() > 5 {
+                    println!("  ... and {} more", bm25_results.len() - 5);
+                }
+
+                // overlap analysis
+                let vector_ids: std::collections::HashSet<&str> = vector_results.iter().map(|(id, _, _)| id.as_str()).collect();
+                let bm25_ids: std::collections::HashSet<&str> = bm25_results.iter().map(|r| r.doc_id.as_str()).collect();
+                let overlap: Vec<&str> = vector_ids.intersection(&bm25_ids).cloned().collect();
+                println!("\n=== debug: overlap analysis ===");
+                println!("  vector-only: {}", vector_results.len() - overlap.len());
+                println!("  bm25-only: {}", bm25_results.len() - overlap.len());
+                println!("  in both: {}", overlap.len());
+                if !overlap.is_empty() {
+                    println!("  overlapping ids: {:?}", overlap.iter().take(3).collect::<Vec<_>>());
+                }
+
+                // embedding verification: compare stored vs freshly generated
+                if let Some((top_id, _, top_text)) = vector_results.first() {
+                    if !top_text.is_empty() {
+                        println!("\n=== debug: embedding verification ===");
+                        // fetch stored vector
+                        let point_ids = vec![qdrant_client::qdrant::PointId::from(top_id.clone())];
+                        if let Ok(get_resp) = qdrant_client
+                            .get_points(
+                                GetPointsBuilder::new(collection_name.clone(), point_ids)
+                                    .with_vectors(true)
+                                    .with_payload(true),
+                            )
+                            .await
+                        {
+                            if let Some(point) = get_resp.result.first() {
+                                // extract stored vector
+                                if let Some(vectors) = &point.vectors {
+                                    if let Some(qdrant_client::qdrant::vectors::VectorsOptions::Vector(v)) = &vectors.vectors_options {
+                                        let stored_vec: Vec<f32> = v.data.clone();
+                                        let stored_norm: f32 = stored_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+                                        // re-embed the text
+                                        if let Ok(fresh_embeddings) = embedder.embed(&[top_text.clone()]) {
+                                            if let Some(fresh_vec) = fresh_embeddings.first() {
+                                                let fresh_norm: f32 = fresh_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+                                                // compute cosine similarity between stored and fresh
+                                                let dot: f32 = stored_vec.iter().zip(fresh_vec.iter()).map(|(a, b)| a * b).sum();
+                                                let cos_sim = dot / (stored_norm * fresh_norm);
+
+                                                println!("  stored vector: {} dims, l2 norm={:.6}", stored_vec.len(), stored_norm);
+                                                println!("  fresh vector: {} dims, l2 norm={:.6}", fresh_vec.len(), fresh_norm);
+                                                println!("  cosine similarity (stored vs fresh): {:.6}", cos_sim);
+                                                println!("  stored first 5: {:?}", &stored_vec[..5.min(stored_vec.len())]);
+                                                println!("  fresh first 5: {:?}", &fresh_vec[..5.min(fresh_vec.len())]);
+
+                                                if cos_sim < 0.99 {
+                                                    println!("  WARNING: embeddings don't match! cosine < 0.99");
+                                                    println!("  this suggests the embedding model or provider has changed");
+                                                } else {
+                                                    println!("  embeddings match (cosine >= 0.99)");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // adaptive scoring: adjust weights based on vector confidence
+            // when vector search returns low-confidence results, heavily favor BM25
+            const LOW_CONFIDENCE_VECTOR_WEIGHT: f32 = 0.2;
+            const LOW_CONFIDENCE_BM25_WEIGHT: f32 = 0.8;
+
+            let (effective_vector_weight, effective_bm25_weight) = if config.adaptive_scoring {
+                let top_vector_score = vector_results.first().map(|(_, s, _)| *s).unwrap_or(0.0);
+
+                if top_vector_score < config.adaptive_threshold {
+                    // low vector confidence → heavily favor BM25
+                    tracing::info!(
+                        "adaptive scoring: top_vector_score={:.4} < threshold={:.2}, using low-confidence weights ({:.2}, {:.2})",
+                        top_vector_score,
+                        config.adaptive_threshold,
+                        LOW_CONFIDENCE_VECTOR_WEIGHT,
+                        LOW_CONFIDENCE_BM25_WEIGHT
+                    );
+                    if args.verbose {
+                        println!("\n=== debug: adaptive scoring ===");
+                        println!("  top vector score: {:.4}", top_vector_score);
+                        println!("  threshold: {:.2}", config.adaptive_threshold);
+                        println!("  decision: LOW CONFIDENCE → favor BM25");
+                        println!("  weights: vector={:.2}, bm25={:.2}", LOW_CONFIDENCE_VECTOR_WEIGHT, LOW_CONFIDENCE_BM25_WEIGHT);
+                    }
+                    (LOW_CONFIDENCE_VECTOR_WEIGHT, LOW_CONFIDENCE_BM25_WEIGHT)
+                } else {
+                    // high vector confidence → use configured weights
+                    if args.verbose {
+                        println!("\n=== debug: adaptive scoring ===");
+                        println!("  top vector score: {:.4}", top_vector_score);
+                        println!("  threshold: {:.2}", config.adaptive_threshold);
+                        println!("  decision: HIGH CONFIDENCE → use configured weights");
+                        println!("  weights: vector={:.2}, bm25={:.2}", config.vector_weight, config.bm25_weight);
+                    }
+                    (config.vector_weight, config.bm25_weight)
+                }
+            } else {
+                (config.vector_weight, config.bm25_weight)
+            };
+
             // fuse results using weighted sum
             let strategy = FusionStrategy::WeightedSum {
-                vector_weight: config.vector_weight,
-                bm25_weight: config.bm25_weight,
+                vector_weight: effective_vector_weight,
+                bm25_weight: effective_bm25_weight,
             };
             let fused = fuse_results(&vector_results, &bm25_results, strategy, initial_limit)?;
 
             tracing::info!("fusion returned {} results", fused.len());
 
+            // fetch text from qdrant for bm25-only results (those with empty text)
+            let missing_text_ids: Vec<String> = fused
+                .iter()
+                .filter(|r| r.text.is_empty())
+                .map(|r| r.doc_id.clone())
+                .collect();
+
+            let payload_map: std::collections::HashMap<String, (String, String)> = if !missing_text_ids.is_empty() {
+                tracing::debug!("fetching text for {} bm25-only results", missing_text_ids.len());
+                let point_ids: Vec<qdrant_client::qdrant::PointId> = missing_text_ids
+                    .iter()
+                    .map(|id| qdrant_client::qdrant::PointId::from(id.clone()))
+                    .collect();
+
+                let get_response = qdrant_client
+                    .get_points(
+                        GetPointsBuilder::new(collection_name.clone(), point_ids)
+                            .with_payload(true),
+                    )
+                    .await?;
+
+                get_response
+                    .result
+                    .into_iter()
+                    .map(|point| {
+                        let id = point_id_to_string(point.id);
+                        let text = point
+                            .payload
+                            .get("text")
+                            .and_then(|v| value_as_string(v))
+                            .unwrap_or_default();
+                        let source = point
+                            .payload
+                            .get("source")
+                            .and_then(|v| value_as_string(v))
+                            .unwrap_or_default();
+                        (id, (text, source))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+
             // convert fused results to QueryResultOutput
             fused
                 .into_iter()
                 .map(|result| {
-                    let source_raw = Some(result.doc_id.clone());
+                    // get text and source - prefer payload_map for bm25-only, use result.text for vector
+                    let (text, source_path) = if result.text.is_empty() {
+                        payload_map
+                            .get(&result.doc_id)
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        let src = vector_source_map
+                            .get(&result.doc_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        (result.text, src)
+                    };
+
+                    let source_raw = if source_path.is_empty() {
+                        Some(result.doc_id.clone())
+                    } else {
+                        Some(source_path)
+                    };
                     let citation_raw = format_citation(source_raw.as_deref());
-                    let citation = display_citation(&citation_raw, source_raw.as_deref(), args.citation_mode);
-                    let source = display_source(source_raw.as_deref(), args.citation_mode);
+                    let citation = display_citation(&citation_raw, source_raw.as_deref(), CitationMode::Full);
+                    let source = display_source(source_raw.as_deref(), CitationMode::Full);
 
                     QueryResultOutput {
                         id: result.doc_id,
                         score: result.score,
-                        text: result.text,
+                        text,
                         citation,
                         source,
                         metadata: std::collections::HashMap::new(),
@@ -2726,7 +2840,9 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
         candidates.into_iter().take(config.top_k).collect()
     };
 
-    match args.format {
+    const DEFAULT_WRAP_WIDTH: usize = 100;
+
+    match output_format {
         OutputFormat::Json => {
             let results_json: Vec<serde_json::Value> = results
                 .iter()
@@ -2745,7 +2861,7 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
             println!("{output}");
         }
         OutputFormat::Text => {
-            render_text_results(&results, args.wrap_width, args.show_scores, args.commits);
+            render_text_results(&results, DEFAULT_WRAP_WIDTH, args.verbose, args.commits);
         }
     }
 
@@ -2756,7 +2872,7 @@ fn build_query_filter(args: &QueryCommand) -> Option<qdrant_client::qdrant::Filt
     use qdrant_client::qdrant::{Condition, Filter};
 
     let mut conditions = Vec::new();
-    if let Some(source_prefix) = &args.source_prefix {
+    if let Some(source_prefix) = &args.source {
         let source_prefix = source_prefix.trim();
         if !source_prefix.is_empty() {
             // use text matching for path filtering

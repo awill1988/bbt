@@ -144,12 +144,19 @@ mod tests {
         let scorer = Bm25Scorer::new();
         let results = scorer.search(&index, "machine learning", 10);
 
-        // should return 2 documents containing "machine learning"
-        assert_eq!(results.len(), 2);
+        // bm25 uses OR semantics - returns documents containing ANY query term
+        // doc1: has "machine" and "learning"
+        // doc2: has "learning"
+        // doc3: has "machine" and "learning"
+        assert_eq!(results.len(), 3);
 
-        // both should have same terms, scores should be > 0
+        // documents with more matching terms should score higher
+        // doc1 and doc3 have both terms, doc2 has only "learning"
         assert!(results[0].score > 0.0);
         assert!(results[1].score > 0.0);
+        assert!(results[2].score > 0.0);
+        // doc2 should score lowest (only has 1 of 2 query terms)
+        assert!(results[2].score < results[0].score);
     }
 
     #[test]

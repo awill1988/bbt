@@ -188,7 +188,7 @@ pub struct OcrStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::pdf::layout::PdfMetadata;
+    use crate::document::pdf::layout::{BoundingBox, PageContent, TextLine};
 
     #[test]
     fn test_ocr_config_default() {

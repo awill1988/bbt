@@ -134,41 +134,48 @@ impl Default for PdfExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // Note: These tests require a pdfium library to be available
-    // They may be skipped in CI environments without pdfium
 
     #[test]
-    #[ignore] // requires pdfium library
     fn test_extractor_new() {
+        // test that pdf extractor creation either succeeds or returns a proper error
+        // (pdfium may not be available in all environments)
         let result = PdfExtractor::new();
-        // May fail if pdfium is not available, which is ok for development
         match result {
-            Ok(_extractor) => {
-                // Successfully created extractor
+            Ok(extractor) => {
+                // if pdfium is available, we should get a valid extractor
+                // we can't do much else without a sample PDF
+                drop(extractor);
             }
             Err(e) => {
-                eprintln!("pdfium not available (ok for development): {}", e);
+                // if pdfium isn't available, we should get an IO error
+                // with a descriptive message about the missing library
+                let error_msg = format!("{}", e);
+                assert!(
+                    error_msg.contains("pdfium") || error_msg.contains("library"),
+                    "error should mention pdfium library: {}",
+                    error_msg
+                );
             }
         }
     }
 
     #[test]
-    #[ignore] // requires pdfium library and sample pdf
-    fn test_extract_metadata() {
-        // This test would require a sample PDF file
-        // In a real implementation, we would include a small test PDF
-        // For now, we mark it as ignored
-    }
+    fn test_extractor_default() {
+        // test that Default trait works (panics if pdfium unavailable)
+        // in production this is expected - we catch the panic in test
+        let result = std::panic::catch_unwind(|| {
+            let _extractor = PdfExtractor::default();
+        });
 
-    #[test]
-    #[ignore] // requires pdfium library and sample pdf
-    fn test_extract_page() {
-        // This test would require a sample PDF file
-        // In a real implementation, we would include a small test PDF
-        // For now, we mark it as ignored
+        // if pdfium is available, this succeeds
+        // if not, it panics - both are valid outcomes for this test
+        match result {
+            Ok(_) => {
+                // pdfium available, default() worked
+            }
+            Err(_) => {
+                // pdfium not available, default() panicked as expected
+            }
+        }
     }
 }

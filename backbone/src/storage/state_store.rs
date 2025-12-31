@@ -1230,11 +1230,11 @@ impl SqliteStateStore {
     fn mark_complete(&mut self, source_path: &str, chunk_count: usize) -> Result<()> {
         let processed_at = Utc::now().to_rfc3339();
         self.conn.execute(
-            "update processing_state set\
-                processed_at = ?1,\
-                chunk_count = ?2,\
-                status = ?3,\
-                error = null\
+            "update processing_state set \
+                processed_at = ?1, \
+                chunk_count = ?2, \
+                status = ?3, \
+                error = null \
              where source_path = ?4",
             params![
                 processed_at,
@@ -1253,10 +1253,10 @@ impl SqliteStateStore {
     fn mark_failed(&mut self, source_path: &str, error: String) -> Result<()> {
         let processed_at = Utc::now().to_rfc3339();
         self.conn.execute(
-            "update processing_state set\
-                processed_at = ?1,\
-                status = ?2,\
-                error = ?3\
+            "update processing_state set \
+                processed_at = ?1, \
+                status = ?2, \
+                error = ?3 \
              where source_path = ?4",
             params![
                 processed_at,

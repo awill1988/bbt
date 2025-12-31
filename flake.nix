@@ -36,7 +36,8 @@
                 name = lib.getName pkg;
                 hasNvidiaPrefix = lib.hasPrefix "cuda" name
                   || lib.hasPrefix "libcu" name || lib.hasPrefix "libnv" name
-                  || lib.hasPrefix "libnpp" name;
+                  || lib.hasPrefix "libnpp" name
+                  || name == "cudnn";
               in hasNvidiaPrefix;
           };
         };
@@ -55,10 +56,13 @@
           echo "image built and tagged: $IMAGE_TAG"
         '';
 
-        bbt-script = pkgs.writeShellScriptBin "bbt" ''
+        bbt-script = pkgs.writeShellScriptBin "bbt" (''
           set -e
-          exec ${rustToolchain}/bin/cargo run --bin bbt -- "$@"
-        '';
+        '' + lib.optionalString (!isDarwin) ''
+          export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.cudaPackages.cuda_cudart}/lib:${pkgs.cudaPackages.libcublas}/lib:${pkgs.cudaPackages.libcufft}/lib:${pkgs.cudaPackages.cudnn}/lib:/usr/lib/wsl/lib:$LD_LIBRARY_PATH"
+        '' + ''
+          exec ${rustToolchain}/bin/cargo run --bin bbt --features ${if isDarwin then "coreml" else "cuda"} -- "$@"
+        '');
 
         nuke-script = pkgs.writeShellScriptBin "nuke" ''
           set -e
@@ -114,7 +118,11 @@
             libiconv
           ] ++ lib.optionals (!isDarwin) [
             gcc
-            cudatoolkit
+            cudaPackages.cudatoolkit
+            cudaPackages.cuda_cudart
+            cudaPackages.libcublas
+            cudaPackages.libcufft
+            cudaPackages.cudnn
           ]);
 
           packages = [
@@ -149,7 +157,10 @@
             if [ -d /usr/lib/wsl/lib ]; then
               export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$LD_LIBRARY_PATH"
             fi
-
+          '' + lib.optionalString (!isDarwin) ''
+            # add cuda, cudnn, and c++ stdlib to path for onnxruntime
+            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.cudaPackages.cuda_cudart}/lib:${pkgs.cudaPackages.libcublas}/lib:${pkgs.cudaPackages.libcufft}/lib:${pkgs.cudaPackages.cudnn}/lib:$LD_LIBRARY_PATH"
+          '' + ''
             # ensure required directories exist
             mkdir -p .cache data
           '';

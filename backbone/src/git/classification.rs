@@ -26,12 +26,12 @@ pub fn classify_commit(message: &str) -> CommitClassification {
 fn classify_by_keywords(message: &str) -> CommitClassification {
     let lower = message.to_lowercase();
 
-    // feature keywords
-    if lower.contains("add") || lower.contains("implement") || lower.contains("feature") {
-        return CommitClassification::Feat;
+    // test keywords - check early since "add test" should be Test not Feat
+    if lower.contains("test") {
+        return CommitClassification::Test;
     }
 
-    // fix keywords
+    // fix keywords - check before "add" since "fix" is more specific
     if lower.contains("fix") || lower.contains("bug") || lower.contains("patch") || lower.contains("hotfix") {
         return CommitClassification::Fix;
     }
@@ -46,13 +46,13 @@ fn classify_by_keywords(message: &str) -> CommitClassification {
         return CommitClassification::Docs;
     }
 
-    // test keywords
-    if lower.contains("test") {
-        return CommitClassification::Test;
+    // feature keywords - checked after more specific classifications
+    if lower.contains("add") || lower.contains("implement") || lower.contains("feature") {
+        return CommitClassification::Feat;
     }
 
-    // chore keywords
-    if lower.contains("chore") || lower.contains("maintenance") || lower.contains("deps") || lower.contains("dependency") {
+    // chore keywords - use "depend" to match both "dependency" and "dependencies"
+    if lower.contains("chore") || lower.contains("maintenance") || lower.contains("deps") || lower.contains("depend") {
         return CommitClassification::Chore;
     }
 
@@ -66,8 +66,9 @@ fn classify_by_keywords(message: &str) -> CommitClassification {
         return CommitClassification::Perf;
     }
 
-    // ci keywords
-    if lower.contains("ci") || lower.contains("github actions") || lower.contains("workflow") {
+    // ci keywords - check for specific terms to avoid matching "ci" in "dependencies"
+    if lower.contains("github actions") || lower.contains("workflow") || lower.contains("pipeline")
+        || lower.contains(" ci ") || lower.starts_with("ci ") || lower.contains(" ci/") {
         return CommitClassification::Ci;
     }
 

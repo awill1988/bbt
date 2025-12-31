@@ -52,6 +52,8 @@ pub fn default_config() -> BbtConfig {
         min_score: 0.5,
         vector_weight: 0.5,
         bm25_weight: 0.5,
+        adaptive_scoring: true,
+        adaptive_threshold: 0.65,
         enable_rerank: false,
         rerank_model_repo: "cross-encoder/ms-marco-MiniLM-L-6-v2".to_string(),
         rerank_model_file: "onnx/model.onnx".to_string(),

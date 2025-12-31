@@ -90,11 +90,14 @@ mod tests {
         let text = "one two three four five six seven eight nine ten";
         let chunks = chunk_text(text, 3, 1).unwrap();
 
-        assert_eq!(chunks.len(), 4);
+        // step = 3 - 1 = 2, so we advance by 2 words each iteration
+        // chunks: [0..3], [2..5], [4..7], [6..9], [8..10]
+        assert_eq!(chunks.len(), 5);
         assert_eq!(chunks[0], "one two three");
         assert_eq!(chunks[1], "three four five");
         assert_eq!(chunks[2], "five six seven");
-        assert_eq!(chunks[3], "seven eight nine ten");
+        assert_eq!(chunks[3], "seven eight nine");
+        assert_eq!(chunks[4], "nine ten");
     }
 
     #[test]

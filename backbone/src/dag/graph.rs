@@ -82,16 +82,10 @@ impl Dag {
     /// level 1: tasks that depend only on level 0 tasks
     /// etc.
     pub fn topological_levels(&self) -> Result<Vec<Vec<String>>> {
-        // calculate in-degree for each task
+        // calculate in-degree for each task (number of dependencies it has)
         let mut in_degree: HashMap<String, usize> = HashMap::new();
-        for task_id in self.dependencies.keys() {
-            in_degree.entry(task_id.clone()).or_insert(0);
-        }
-
-        for deps in self.dependencies.values() {
-            for dep in deps {
-                *in_degree.entry(dep.clone()).or_insert(0) += 1;
-            }
+        for (task_id, deps) in &self.dependencies {
+            in_degree.insert(task_id.clone(), deps.len());
         }
 
         // start with tasks that have no dependencies (in-degree = 0)

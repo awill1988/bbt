@@ -12,6 +12,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 mod chunk_budget;
 mod cmd;
 mod resource_monitor;
+mod terminal_layout;
 #[cfg(feature = "heap-profiling")]
 mod profiler;
 

@@ -87,9 +87,9 @@ mod tests {
     #[test]
     fn test_default_model() {
         let model = EmbeddingModelInfo::default_model();
-        assert_eq!(model.repo_id, "BAAI/bge-small-en-v1.5");
-        assert_eq!(model.dimensions, 384);
-        assert_eq!(model.max_seq_len, 512);
+        assert_eq!(model.repo_id, "jinaai/jina-embeddings-v2-base-code");
+        assert_eq!(model.dimensions, 768);
+        assert_eq!(model.max_seq_len, 8192);
     }
 
     #[test]

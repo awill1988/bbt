@@ -1,19 +1,20 @@
 use crate::error::Result;
+use crate::embedding::Embedder;
 use crate::embedding::onnx::OnnxEmbedder;
 
-/// Batch embedding processor
-pub struct BatchEmbedder<'a> {
-    embedder: &'a mut OnnxEmbedder,
+/// Batch embedding processor - generic over any Embedder implementation
+pub struct BatchEmbedder<'a, E: Embedder> {
+    embedder: &'a mut E,
     batch_size: usize,
 }
 
-impl<'a> BatchEmbedder<'a> {
+impl<'a, E: Embedder> BatchEmbedder<'a, E> {
     /// Create a new batch embedder
     ///
     /// # Arguments
-    /// * `embedder` - The ONNX embedder to use
+    /// * `embedder` - The embedder to use (implements Embedder trait)
     /// * `batch_size` - Number of texts to process per batch
-    pub fn new(embedder: &'a mut OnnxEmbedder, batch_size: usize) -> Self {
+    pub fn new(embedder: &'a mut E, batch_size: usize) -> Self {
         Self {
             embedder,
             batch_size,
@@ -67,26 +68,41 @@ impl<'a> BatchEmbedder<'a> {
     pub fn batch_size(&self) -> usize {
         self.batch_size
     }
+
+    /// Get embedding dimensions from the underlying embedder
+    pub fn dimensions(&self) -> usize {
+        self.embedder.dimensions()
+    }
 }
 
-/// Async batch embedding processor
-pub struct AsyncBatchEmbedder<'a> {
-    embedder: &'a OnnxEmbedder,
+/// Async batch embedding processor - generic over any Embedder implementation
+///
+/// Note: Current implementation uses spawn_blocking with placeholder embeddings.
+/// For real async embedding, would need Arc<Mutex<E>> or Send + Sync embedder.
+pub struct AsyncBatchEmbedder<'a, E: Embedder> {
+    embedder: &'a E,
     batch_size: usize,
 }
 
-impl<'a> AsyncBatchEmbedder<'a> {
+impl<'a, E: Embedder> AsyncBatchEmbedder<'a, E> {
     /// Create a new async batch embedder
-    pub fn new(embedder: &'a OnnxEmbedder, batch_size: usize) -> Self {
+    pub fn new(embedder: &'a E, batch_size: usize) -> Self {
         Self {
             embedder,
             batch_size,
         }
     }
 
+    /// Get embedding dimensions from the underlying embedder
+    pub fn dimensions(&self) -> usize {
+        self.embedder.dimensions()
+    }
+
     /// Process texts in batches asynchronously
     ///
-    /// Runs embedding generation in a blocking task to avoid blocking async runtime
+    /// Runs embedding generation in a blocking task to avoid blocking async runtime.
+    /// Note: Currently generates placeholder embeddings - real implementation would
+    /// need Arc<Mutex<E>> to share embedder across thread boundary.
     pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
@@ -104,15 +120,20 @@ impl<'a> AsyncBatchEmbedder<'a> {
         );
 
         // run embedding in blocking task
+        // todo: use Arc<Mutex<E>> to actually call embedder.embed() in blocking task
         let result = tokio::task::spawn_blocking(move || {
             let mut all_embeddings = Vec::with_capacity(total);
 
             for chunk in texts.chunks(batch_size) {
-                // simulate embedding generation
-                // todo: replace with actual embedder.embed() when available
+                // placeholder: generate deterministic embeddings based on text
                 let embeddings: Vec<Vec<f32>> = chunk
                     .iter()
-                    .map(|_| vec![0.0; dimensions])
+                    .map(|text| {
+                        let hash = text.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64));
+                        (0..dimensions)
+                            .map(|i| ((hash.wrapping_mul(i as u64 + 1) % 1000) as f32) / 1000.0)
+                            .collect()
+                    })
                     .collect();
 
                 all_embeddings.extend(embeddings);
@@ -130,24 +151,18 @@ impl<'a> AsyncBatchEmbedder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedding::models::EmbeddingModelInfo;
-    use crate::embedding::onnx::{ExecutionProvider, OnnxEmbedder};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use crate::embedding::MockEmbedder;
 
-    fn create_test_embedder() -> Result<OnnxEmbedder> {
-        let mut temp_file = NamedTempFile::new()?;
-        temp_file.write_all(b"dummy model")?;
-        temp_file.flush()?;
+    const TEST_DIMENSIONS: usize = 768;
 
-        let model_info = EmbeddingModelInfo::default_model();
-        OnnxEmbedder::new(temp_file.path(), model_info, ExecutionProvider::Cpu)
+    fn create_mock_embedder() -> MockEmbedder {
+        MockEmbedder::new(TEST_DIMENSIONS)
     }
 
     #[test]
     fn test_batch_embedder_empty() -> Result<()> {
-        let embedder = create_test_embedder()?;
-        let batch_embedder = BatchEmbedder::new(&embedder, 32);
+        let mut embedder = create_mock_embedder();
+        let mut batch_embedder = BatchEmbedder::new(&mut embedder, 32);
 
         let embeddings = batch_embedder.embed_batch(&[])?;
         assert_eq!(embeddings.len(), 0);
@@ -157,22 +172,22 @@ mod tests {
 
     #[test]
     fn test_batch_embedder_single_batch() -> Result<()> {
-        let embedder = create_test_embedder()?;
-        let batch_embedder = BatchEmbedder::new(&embedder, 32);
+        let mut embedder = create_mock_embedder();
+        let mut batch_embedder = BatchEmbedder::new(&mut embedder, 32);
 
         let texts: Vec<String> = (0..10).map(|i| format!("text {}", i)).collect();
         let embeddings = batch_embedder.embed_batch(&texts)?;
 
         assert_eq!(embeddings.len(), 10);
-        assert_eq!(embeddings[0].len(), 384);
+        assert_eq!(embeddings[0].len(), TEST_DIMENSIONS);
 
         Ok(())
     }
 
     #[test]
     fn test_batch_embedder_multiple_batches() -> Result<()> {
-        let embedder = create_test_embedder()?;
-        let batch_embedder = BatchEmbedder::new(&embedder, 10);
+        let mut embedder = create_mock_embedder();
+        let mut batch_embedder = BatchEmbedder::new(&mut embedder, 10);
 
         let texts: Vec<String> = (0..35).map(|i| format!("text {}", i)).collect();
         let embeddings = batch_embedder.embed_batch(&texts)?;
@@ -185,35 +200,88 @@ mod tests {
 
     #[test]
     fn test_batch_embedder_batch_size() -> Result<()> {
-        let embedder = create_test_embedder()?;
-        let batch_embedder = BatchEmbedder::new(&embedder, 16);
+        let mut embedder = create_mock_embedder();
+        let batch_embedder = BatchEmbedder::new(&mut embedder, 16);
 
         assert_eq!(batch_embedder.batch_size(), 16);
 
         Ok(())
     }
 
+    #[test]
+    fn test_batch_embedder_dimensions() -> Result<()> {
+        let mut embedder = create_mock_embedder();
+        let batch_embedder = BatchEmbedder::new(&mut embedder, 16);
+
+        assert_eq!(batch_embedder.dimensions(), TEST_DIMENSIONS);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_embedder_deterministic() -> Result<()> {
+        // verify mock embeddings are deterministic (same text = same embedding)
+        let mut embedder = create_mock_embedder();
+        let mut batch_embedder = BatchEmbedder::new(&mut embedder, 32);
+
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let embeddings1 = batch_embedder.embed_batch(&texts)?;
+
+        let mut embedder2 = create_mock_embedder();
+        let mut batch_embedder2 = BatchEmbedder::new(&mut embedder2, 32);
+        let embeddings2 = batch_embedder2.embed_batch(&texts)?;
+
+        assert_eq!(embeddings1, embeddings2);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_async_batch_embedder() -> Result<()> {
-        let embedder = create_test_embedder()?;
+        let embedder = create_mock_embedder();
         let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
 
         let texts: Vec<String> = (0..10).map(|i| format!("text {}", i)).collect();
         let embeddings = async_embedder.embed_batch(texts).await?;
 
         assert_eq!(embeddings.len(), 10);
-        assert_eq!(embeddings[0].len(), 384);
+        assert_eq!(embeddings[0].len(), TEST_DIMENSIONS);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_async_batch_embedder_empty() -> Result<()> {
-        let embedder = create_test_embedder()?;
+        let embedder = create_mock_embedder();
         let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
 
         let embeddings = async_embedder.embed_batch(vec![]).await?;
         assert_eq!(embeddings.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_batch_embedder_dimensions() -> Result<()> {
+        let embedder = create_mock_embedder();
+        let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
+
+        assert_eq!(async_embedder.dimensions(), TEST_DIMENSIONS);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_batch_embedder_deterministic() -> Result<()> {
+        // verify async embeddings are deterministic
+        let embedder = create_mock_embedder();
+        let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
+
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let embeddings1 = async_embedder.embed_batch(texts.clone()).await?;
+        let embeddings2 = async_embedder.embed_batch(texts).await?;
+
+        assert_eq!(embeddings1, embeddings2);
 
         Ok(())
     }

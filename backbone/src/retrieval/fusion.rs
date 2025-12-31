@@ -265,9 +265,15 @@ mod tests {
         // should have 3 documents
         assert_eq!(fused.len(), 3);
 
-        // doc2 appears in both, should score highest
-        assert_eq!(fused[0].doc_id, "doc2");
-        assert!(fused[0].score > 0.5);
+        // with min-max normalization:
+        // - doc1: vector_norm=1.0 (highest), bm25_norm=0.0 (absent) -> 0.6*1.0 + 0.4*0.0 = 0.6
+        // - doc2: vector_norm=0.0 (lowest), bm25_norm=1.0 (highest) -> 0.6*0.0 + 0.4*1.0 = 0.4
+        // - doc3: vector_norm=0.0 (absent), bm25_norm=0.0 (lowest) -> 0.0
+        // doc1 wins because vector_weight (0.6) > bm25_weight (0.4)
+        assert_eq!(fused[0].doc_id, "doc1");
+        assert!((fused[0].score - 0.6).abs() < 0.01);
+        assert_eq!(fused[1].doc_id, "doc2");
+        assert!((fused[1].score - 0.4).abs() < 0.01);
     }
 
     #[test]

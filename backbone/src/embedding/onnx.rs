@@ -448,6 +448,16 @@ impl OnnxEmbedder {
     }
 }
 
+impl super::Embedder for OnnxEmbedder {
+    fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        OnnxEmbedder::embed(self, texts)
+    }
+
+    fn dimensions(&self) -> usize {
+        OnnxEmbedder::dimensions(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,25 +482,6 @@ mod tests {
     }
 
     #[test]
-    fn test_onnx_embedder_new() -> Result<()> {
-        let mut temp_file = NamedTempFile::new()?;
-        temp_file.write_all(b"dummy model")?;
-        temp_file.flush()?;
-
-        let model_info = EmbeddingModelInfo::default_model();
-        let embedder = OnnxEmbedder::new(
-            temp_file.path(),
-            model_info,
-            ExecutionProvider::Cpu,
-        )?;
-
-        assert_eq!(embedder.dimensions(), 384);
-        assert_eq!(embedder.provider(), ExecutionProvider::Cpu);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_onnx_embedder_nonexistent_model() {
         let model_info = EmbeddingModelInfo::default_model();
         let result = OnnxEmbedder::new(
@@ -498,48 +489,84 @@ mod tests {
             model_info,
             ExecutionProvider::Cpu,
         );
-        assert!(result.is_err());
+        match result {
+            Ok(_) => panic!("expected error for nonexistent model"),
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                assert!(
+                    error_msg.contains("tokenizer") || error_msg.contains("model"),
+                    "error should mention tokenizer or model: {}",
+                    error_msg
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_onnx_embedder_embed_empty() -> Result<()> {
-        let mut temp_file = NamedTempFile::new()?;
-        temp_file.write_all(b"dummy model")?;
-        temp_file.flush()?;
+    fn test_onnx_embedder_invalid_model_path() {
+        // test with a path that exists but isn't a valid model
+        let temp_dir = tempfile::tempdir().unwrap();
+        let model_path = temp_dir.path().join("fake_model.onnx");
+
+        // create an empty file (not a valid ONNX model)
+        std::fs::write(&model_path, b"not a valid onnx model").unwrap();
 
         let model_info = EmbeddingModelInfo::default_model();
-        let mut embedder = OnnxEmbedder::new(
-            temp_file.path(),
+        let result = OnnxEmbedder::new(
+            &model_path,
             model_info,
             ExecutionProvider::Cpu,
-        )?;
+        );
 
-        let embeddings = embedder.embed(&[])?;
-        assert_eq!(embeddings.len(), 0);
-
-        Ok(())
+        // should fail because tokenizer.json doesn't exist
+        match result {
+            Ok(_) => panic!("expected error for invalid model"),
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                assert!(
+                    error_msg.contains("tokenizer"),
+                    "error should mention missing tokenizer: {}",
+                    error_msg
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_onnx_embedder_embed() -> Result<()> {
-        let mut temp_file = NamedTempFile::new()?;
-        temp_file.write_all(b"dummy model")?;
-        temp_file.flush()?;
+    fn test_onnx_embedder_missing_tokenizer() {
+        // test that proper error is returned when tokenizer is missing
+        let temp_dir = tempfile::tempdir().unwrap();
+        let model_path = temp_dir.path().join("model.onnx");
+
+        // create fake model file but no tokenizer.json
+        std::fs::write(&model_path, b"fake onnx data").unwrap();
 
         let model_info = EmbeddingModelInfo::default_model();
-        let mut embedder = OnnxEmbedder::new(
-            temp_file.path(),
+        let result = OnnxEmbedder::new(
+            &model_path,
             model_info,
             ExecutionProvider::Cpu,
-        )?;
+        );
 
-        let texts = vec!["hello world".to_string(), "test".to_string()];
-        let embeddings = embedder.embed(&texts)?;
+        match result {
+            Ok(_) => panic!("expected error for missing tokenizer"),
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                assert!(
+                    error_msg.contains("tokenizer"),
+                    "error should mention tokenizer: {}",
+                    error_msg
+                );
+            }
+        }
+    }
 
-        assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].len(), 384);
-        assert_eq!(embeddings[1].len(), 384);
-
-        Ok(())
+    #[test]
+    fn test_model_info_in_error() {
+        // verify model info is accessible before loading
+        let model_info = EmbeddingModelInfo::default_model();
+        assert_eq!(model_info.dimensions, 768);
+        assert_eq!(model_info.max_seq_len, 8192);
+        assert!(model_info.repo_id.contains("jina"));
     }
 }

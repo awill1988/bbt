@@ -72,6 +72,8 @@ pub fn from_env() -> Result<BbtConfig> {
             defaults.vector_weight,
         )?,
         bm25_weight: get_env_parse_or(&["BM25_WEIGHT"], defaults.bm25_weight)?,
+        adaptive_scoring: get_env_bool_or(&["ADAPTIVE_SCORING"], defaults.adaptive_scoring)?,
+        adaptive_threshold: get_env_parse_or(&["ADAPTIVE_THRESHOLD"], defaults.adaptive_threshold)?,
         enable_rerank: get_env_bool_or(&["ENABLE_RERANK"], defaults.enable_rerank)?,
         rerank_model_repo: get_env_or(
             &["RERANK_MODEL_REPO"],
@@ -222,9 +224,16 @@ fn get_env_bool_or(keys: &[&str], default: bool) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RetrievalMode;
+    use std::sync::Mutex;
+
+    // mutex to serialize tests that modify env vars
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_from_env_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         // Clear any existing env vars
         std::env::remove_var("CHUNK_SIZE");
         std::env::remove_var("LOG_LEVEL");
@@ -236,6 +245,14 @@ mod tests {
 
     #[test]
     fn test_env_parsing() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // save original values
+        let orig_chunk = std::env::var("CHUNK_SIZE").ok();
+        let orig_ocr = std::env::var("ENABLE_OCR").ok();
+        let orig_mode = std::env::var("RETRIEVAL_MODE").ok();
+
+        // set test values
         std::env::set_var("CHUNK_SIZE", "1024");
         std::env::set_var("ENABLE_OCR", "true");
         std::env::set_var("RETRIEVAL_MODE", "vector");
@@ -245,9 +262,18 @@ mod tests {
         assert_eq!(config.enable_ocr, true);
         assert_eq!(config.retrieval_mode, RetrievalMode::Vector);
 
-        // Cleanup
-        std::env::remove_var("CHUNK_SIZE");
-        std::env::remove_var("ENABLE_OCR");
-        std::env::remove_var("RETRIEVAL_MODE");
+        // restore original values
+        match orig_chunk {
+            Some(v) => std::env::set_var("CHUNK_SIZE", v),
+            None => std::env::remove_var("CHUNK_SIZE"),
+        }
+        match orig_ocr {
+            Some(v) => std::env::set_var("ENABLE_OCR", v),
+            None => std::env::remove_var("ENABLE_OCR"),
+        }
+        match orig_mode {
+            Some(v) => std::env::set_var("RETRIEVAL_MODE", v),
+            None => std::env::remove_var("RETRIEVAL_MODE"),
+        }
     }
 }

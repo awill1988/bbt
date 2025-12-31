@@ -42,6 +42,10 @@ pub struct BbtConfig {
     pub min_score: f32,
     pub vector_weight: f32,
     pub bm25_weight: f32,
+    /// Enable adaptive scoring: adjust weights based on vector confidence
+    pub adaptive_scoring: bool,
+    /// Vector score threshold below which BM25 is favored (default 0.65)
+    pub adaptive_threshold: f32,
     pub enable_rerank: bool,
     pub rerank_model_repo: String,
     pub rerank_model_file: String,

@@ -416,10 +416,7 @@ async fn process_embedding_result(
     collection_name: &str,
     bm25_index: &mut backbone::retrieval::bm25::Bm25Index,
     state_store: &mut backbone::storage::StateStore,
-    files_bar: &indicatif::ProgressBar,
-    bytes_bar: &indicatif::ProgressBar,
-    files_message_width: usize,
-    bytes_message_width: usize,
+    ui: &crate::terminal_layout::TerminalUiHandle,
 ) -> Result<()> {
     use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder, Value};
     use uuid::Uuid;
@@ -448,12 +445,7 @@ async fn process_embedding_result(
                 format!("embedding failed: {err}"),
             );
             let _ = state_store.mark_failed(&source_path, err);
-            let files_message = right_align_truncate(&display_name, files_message_width);
-            let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
-            files_bar.set_message(files_message);
-            bytes_bar.set_message(bytes_message);
-            files_bar.inc(1);
-            bytes_bar.inc(file_size_bytes);
+            advance_file_progress(ui, &display_name, file_size_bytes);
             return Ok(());
         }
     };
@@ -473,12 +465,7 @@ async fn process_embedding_result(
             "embedding count mismatch".to_string(),
         );
         let _ = state_store.mark_failed(&source_path, "embedding count mismatch".to_string());
-        let files_message = right_align_truncate(&display_name, files_message_width);
-        let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
-        files_bar.set_message(files_message);
-        bytes_bar.set_message(bytes_message);
-        files_bar.inc(1);
-        bytes_bar.inc(file_size_bytes);
+        advance_file_progress(ui, &display_name, file_size_bytes);
         return Ok(());
     }
 
@@ -512,12 +499,7 @@ async fn process_embedding_result(
                 tracing::debug!("successfully ingested file {:?}", file_path);
                 let _ = state_store.mark_complete(&source_path, all_points.len());
                 let _ = state_store.clear_failure(&source_path);
-                let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
-                files_bar.set_message(files_message);
-                bytes_bar.set_message(bytes_message);
-                files_bar.inc(1);
-                bytes_bar.inc(file_size_bytes);
+                advance_file_progress(ui, &display_name, file_size_bytes);
                 success = true;
             }
             Err(e) => {
@@ -548,12 +530,7 @@ async fn process_embedding_result(
                         format!("upsert failed: {e}"),
                     );
                     let _ = state_store.mark_failed(&source_path, e.to_string());
-                    let files_message = right_align_truncate(&display_name, files_message_width);
-                    let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
-                    files_bar.set_message(files_message);
-                    bytes_bar.set_message(bytes_message);
-                    files_bar.inc(1);
-                    bytes_bar.inc(file_size_bytes);
+                    advance_file_progress(ui, &display_name, file_size_bytes);
                     retry_count += 1;
                 }
             }
@@ -563,6 +540,18 @@ async fn process_embedding_result(
     Ok(())
 }
 
+fn advance_file_progress(
+    ui: &crate::terminal_layout::TerminalUiHandle,
+    display_name: &str,
+    file_size_bytes: u64,
+) {
+    ui.set_current_file(display_name.to_string(), file_size_bytes);
+    ui.set_files_message(display_name.to_string());
+    ui.set_bytes_message(format_filesize_message(file_size_bytes));
+    ui.inc_files(1);
+    ui.inc_bytes(file_size_bytes);
+}
+
 async fn drain_embedding_results(
     result_rx: &std::sync::mpsc::Receiver<EmbeddingResult>,
     pending_tasks: &mut usize,
@@ -570,10 +559,7 @@ async fn drain_embedding_results(
     collection_name: &str,
     bm25_index: &mut backbone::retrieval::bm25::Bm25Index,
     state_store: &mut backbone::storage::StateStore,
-    files_bar: &indicatif::ProgressBar,
-    bytes_bar: &indicatif::ProgressBar,
-    files_message_width: usize,
-    bytes_message_width: usize,
+    ui: &crate::terminal_layout::TerminalUiHandle,
 ) -> Result<()> {
     loop {
         match result_rx.try_recv() {
@@ -585,10 +571,7 @@ async fn drain_embedding_results(
                     collection_name,
                     bm25_index,
                     state_store,
-                    files_bar,
-                    bytes_bar,
-                    files_message_width,
-                    bytes_message_width,
+                    ui,
                 )
                 .await?;
             }
@@ -608,8 +591,6 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     use backbone::retrieval::bm25::{load_index, save_index};
     use backbone::storage::StateStore;
     use backbone::tracing::init_tracing;
-    use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-    use console::Term;
     use qdrant_client::Qdrant;
     use std::fs;
     use std::sync::{mpsc, Arc, Mutex};
@@ -642,29 +623,14 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     }
     let extensions = expand_extensions(&args.ext);
 
-    let term = Term::stderr();
-    let term_width = usize::from(term.size().1);
+    let terminal_ui = crate::terminal_layout::TerminalUi::new()
+        .map_err(|e| anyhow!("failed to set up terminal ui: {}", e))?;
+    let ui = terminal_ui.handle();
+    let _guard = init_tracing("bbt", terminal_ui.log_sender())?;
 
-    // set up scrolling log region (logs scroll below, progress bars stay at top)
-    // header: 4 lines for progress bars (scan, resource, files, bytes)
-    let scrolling_log_guard = crate::terminal_layout::setup_scrolling_logs(4)
-        .map_err(|e| anyhow!("failed to set up terminal layout: {}", e))?;
-    let log_tx = scrolling_log_guard.log_sender();
-
-    let _guard = init_tracing("bbt", Some(log_tx.clone()))?;
-
-    let progress = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
-    progress.set_move_cursor(true);
-    let scan_bar = progress.add(ProgressBar::new_spinner());
-    scan_bar.set_style(
-        ProgressStyle::with_template("{prefix} {spinner} {msg}")?
-            .tick_chars("|/-\\"),
-    );
-    scan_bar.set_prefix("scan");
-    scan_bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    ui.set_scan_message("starting scan".to_string());
 
     let scan_scope_key = build_scan_scope_key(&args, &extensions);
-    let scan_message_width = scan_message_width(term_width, scan_bar.prefix().len());
 
     let scan_run = state_store.get_scan_run(&scan_scope_key)?;
     let (candidates, scan_totals, scan_run_id) = if let Some(run) = scan_run {
@@ -676,15 +642,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                 let (candidates, scan_totals) = collect_candidates(
                     &args,
                     &extensions,
-                    &scan_bar,
+                    &ui,
                     &mut state_store,
                     &scan_scope_key,
                     &scan_progress,
-                    scan_message_width,
                 )?;
                 state_store.finish_scan(&scan_scope_key, &scan_progress.run_id)?;
-                scan_bar.finish_and_clear();
-                progress.remove(&scan_bar);
+                ui.finish_scan();
                 tracing::info!(
                     "scan complete: {} files, {} bytes",
                     scan_totals.files,
@@ -707,7 +671,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                         summary.bytes_seen
                     );
                 }
-                scan_bar.set_message(format!(
+                ui.set_scan_message(format!(
                     "{} files, {} bytes",
                     summary.files_seen, summary.bytes_seen
                 ));
@@ -723,15 +687,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     let (candidates, scan_totals) = collect_candidates(
                         &args,
                         &extensions,
-                        &scan_bar,
+                        &ui,
                         &mut state_store,
                         &scan_scope_key,
                         &scan_progress,
-                        scan_message_width,
                     )?;
                     state_store.finish_scan(&scan_scope_key, &scan_progress.run_id)?;
-                    scan_bar.finish_and_clear();
-                    progress.remove(&scan_bar);
+                    ui.finish_scan();
                     tracing::info!(
                         "scan complete: {} files, {} bytes",
                         scan_totals.files,
@@ -747,8 +709,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                             modified_at: entry.modified_at,
                         })
                         .collect::<Vec<_>>();
-                    scan_bar.finish_and_clear();
-                    progress.remove(&scan_bar);
+                    ui.finish_scan();
                     tracing::info!(
                         "scan cached: {} files, {} bytes",
                         summary.files_seen,
@@ -766,7 +727,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             }
         } else {
             let scan_progress = state_store.start_scan(&scan_scope_key)?;
-            scan_bar.set_message(format!(
+            ui.set_scan_message(format!(
                 "{} files, {} bytes",
                 scan_progress.files_seen, scan_progress.bytes_seen
             ));
@@ -780,15 +741,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             let (candidates, scan_totals) = collect_candidates(
                 &args,
                 &extensions,
-                &scan_bar,
+                &ui,
                 &mut state_store,
                 &scan_scope_key,
                 &scan_progress,
-                scan_message_width,
             )?;
             state_store.finish_scan(&scan_scope_key, &scan_progress.run_id)?;
-            scan_bar.finish_and_clear();
-            progress.remove(&scan_bar);
+            ui.finish_scan();
             tracing::info!(
                 "scan complete: {} files, {} bytes",
                 scan_totals.files,
@@ -798,22 +757,20 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         }
     } else {
         let scan_progress = state_store.start_scan(&scan_scope_key)?;
-        scan_bar.set_message(format!(
+        ui.set_scan_message(format!(
             "{} files, {} bytes",
             scan_progress.files_seen, scan_progress.bytes_seen
         ));
         let (candidates, scan_totals) = collect_candidates(
             &args,
             &extensions,
-            &scan_bar,
+            &ui,
             &mut state_store,
             &scan_scope_key,
             &scan_progress,
-            scan_message_width,
         )?;
         state_store.finish_scan(&scan_scope_key, &scan_progress.run_id)?;
-        scan_bar.finish_and_clear();
-        progress.remove(&scan_bar);
+        ui.finish_scan();
         tracing::info!(
             "scan complete: {} files, {} bytes",
             scan_totals.files,
@@ -824,43 +781,8 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     let total_files = scan_totals.files;
     let total_bytes = scan_totals.bytes;
-
-    // create resource monitor bar
-    let resource_bar = progress.add(ProgressBar::new_spinner());
-    let resource_style = ProgressStyle::with_template("{spinner:.green} {msg}")?;
-    resource_bar.set_style(resource_style);
-    resource_bar.enable_steady_tick(std::time::Duration::from_millis(500));
-
-    let files_bar = progress.add(ProgressBar::new(total_files));
-    let bytes_bar = progress.add(ProgressBar::new(total_bytes));
-
-    let files_style = ProgressStyle::with_template(
-        "{prefix} [{bar:40.cyan/blue}] {pos}/{len} {msg}",
-    )?;
-    let bytes_style = ProgressStyle::with_template(
-        "{prefix} [{bar:40.green/green}] {bytes}/{total_bytes} {msg}",
-    )?;
-
-    files_bar.set_style(files_style);
-    bytes_bar.set_style(bytes_style);
-    files_bar.set_prefix("files");
-    bytes_bar.set_prefix("bytes");
-    let files_count_width = total_files.to_string().len();
-    let bytes_count_width = format!("{}", HumanBytes(total_bytes)).len();
-    let files_message_width = progress_message_width(
-        term_width,
-        files_bar.prefix().len(),
-        40,
-        files_count_width,
-        files_count_width,
-    );
-    let bytes_message_width = progress_message_width(
-        term_width,
-        bytes_bar.prefix().len(),
-        40,
-        bytes_count_width,
-        bytes_count_width,
-    );
+    ui.set_files_total(total_files);
+    ui.set_bytes_total(total_bytes);
 
     let mut resumed_files = 0_u64;
     let mut resumed_bytes = 0_u64;
@@ -879,8 +801,8 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         );
     }
 
-    files_bar.set_position(resumed_files);
-    bytes_bar.set_position(resumed_bytes);
+    ui.set_files_position(resumed_files);
+    ui.set_bytes_position(resumed_bytes);
 
     let model_info = EmbeddingModelInfo::default_model();
     let vector_dimensions = model_info.dimensions;
@@ -1118,9 +1040,11 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     let display_stats_clone = Arc::clone(&display_stats);
 
     // spawn resource monitor update task
-    let resource_bar_clone = resource_bar.clone();
+    let ui_clone = ui.clone();
     let chunk_budget_clone = Arc::clone(&chunk_budget);
     let active_sessions_clone = Arc::clone(&active_sessions);
+    let resource_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resource_done_clone = Arc::clone(&resource_done);
     #[cfg(feature = "heap-profiling")]
     let shared_stats_clone = std::sync::Arc::clone(&shared_stats);
 
@@ -1154,7 +1078,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                 pool_limit_kib,
                 exclusive_tag,
             );
-            resource_bar_clone.set_message(combined);
+            ui_clone.set_resource_message(combined);
 
             // update shared stats for profiling
             #[cfg(feature = "heap-profiling")]
@@ -1165,7 +1089,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(200));
 
             // check if bar is finished (indicates main thread completed)
-            if resource_bar_clone.is_finished() {
+            if resource_done_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
         }
@@ -1204,10 +1128,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             &collection_name,
             &mut bm25_index,
             &mut state_store,
-            &files_bar,
-            &bytes_bar,
-            files_message_width,
-            bytes_message_width,
+            &ui,
         )
         .await?;
 
@@ -1227,12 +1148,14 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             .map(|root| get_repo_name(&root))
             .unwrap_or_else(|| "no-repo".to_string());
         let display_name = format!("{}/{}", repo_name, filename);
+        ui.set_current_file(display_name.clone(), file_size_bytes);
+        ui.set_files_message(display_name.clone());
+        ui.set_bytes_message(format_filesize_message(file_size_bytes));
 
         // skip empty files silently (e.g., __init__.py)
         if file_size_bytes == 0 {
             tracing::debug!("skipping empty file {:?}", file_path);
-            files_bar.inc(1);
-            // note: not incrementing bytes_bar since size is 0
+            advance_file_progress(&ui, &display_name, file_size_bytes);
             continue;
         }
 
@@ -1265,12 +1188,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     format!("load failed: {e}"),
                 );
                 let _ = state_store.mark_failed(&source_path, e.to_string());
-                let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
-                files_bar.set_message(files_message);
-                bytes_bar.set_message(bytes_message);
-                files_bar.inc(1);
-                bytes_bar.inc(candidate.size_bytes);
+                advance_file_progress(&ui, &display_name, file_size_bytes);
                 continue;
             }
         };
@@ -1296,12 +1214,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     format!("chunk failed: {e}"),
                 );
                 let _ = state_store.mark_failed(&source_path, e.to_string());
-                let files_message = right_align_truncate(&display_name, files_message_width);
-                let bytes_message = format_filesize_message(file_size_bytes, bytes_message_width);
-                files_bar.set_message(files_message);
-                bytes_bar.set_message(bytes_message);
-                files_bar.inc(1);
-                bytes_bar.inc(candidate.size_bytes);
+                advance_file_progress(&ui, &display_name, file_size_bytes);
                 continue;
             }
         };
@@ -1313,8 +1226,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                 "skipping file {:?} (no chunks produced - likely only whitespace)",
                 file_path
             );
-            files_bar.inc(1);
-            bytes_bar.inc(candidate.size_bytes);
+            advance_file_progress(&ui, &display_name, file_size_bytes);
             continue;
         }
 
@@ -1339,7 +1251,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
                     #[cfg(feature = "heap-profiling")]
                     {
-                        let current_files = files_bar.position();
+                        let current_files = ui.files_position();
                         let stats = shared_stats.lock().unwrap().clone();
 
                         // calculate memory usage percentage
@@ -1419,7 +1331,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     }
 
                     // periodic bm25 index flushing for data safety
-                    let current_files = files_bar.position();
+                    let current_files = ui.files_position();
                     const BM25_FLUSH_INTERVAL: u64 = 100;
                     if current_files > 0 && current_files % BM25_FLUSH_INTERVAL == 0 {
                         tracing::info!(
@@ -1443,10 +1355,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                         &collection_name,
                         &mut bm25_index,
                         &mut state_store,
-                        &files_bar,
-                        &bytes_bar,
-                        files_message_width,
-                        bytes_message_width,
+                        &ui,
                     )
                     .await?;
                 }
@@ -1463,10 +1372,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
             &collection_name,
             &mut bm25_index,
             &mut state_store,
-            &files_bar,
-            &bytes_bar,
-            files_message_width,
-            bytes_message_width,
+            &ui,
         )
         .await?;
     }
@@ -1483,10 +1389,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     &collection_name,
                     &mut bm25_index,
                     &mut state_store,
-                    &files_bar,
-                    &bytes_bar,
-                    files_message_width,
-                    bytes_message_width,
+                    &ui,
                 )
                 .await?;
             }
@@ -1498,9 +1401,9 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         let _ = handle.join();
     }
 
-    files_bar.finish_with_message("done");
-    bytes_bar.finish_with_message("done");
-    resource_bar.finish_and_clear();
+    ui.finish_files("done");
+    ui.finish_bytes("done");
+    resource_done.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // wait for resource monitor thread to finish
     let _ = resource_update_handle.join();
@@ -1523,7 +1426,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     tracing::info!("sync completed");
 
-    // scrolling_log_guard cleanup is handled by Drop
+    // terminal ui cleanup is handled by Drop
 
     // write final heap snapshot after all progress bars are closed
     #[cfg(feature = "heap-profiling")]
@@ -1746,11 +1649,10 @@ struct ScanTotals {
 fn collect_candidates(
     args: &SyncCommand,
     extensions: &[String],
-    scan_bar: &indicatif::ProgressBar,
+    ui: &crate::terminal_layout::TerminalUiHandle,
     state_store: &mut backbone::storage::StateStore,
     scan_scope_key: &str,
     scan_progress: &backbone::storage::ScanProgress,
-    scan_message_width: usize,
 ) -> Result<(Vec<FileCandidate>, ScanTotals)> {
     use ignore::{WalkBuilder, WalkState};
     use std::collections::HashSet;
@@ -1948,11 +1850,10 @@ fn collect_candidates(
 
                 totals.files = progress.files_seen;
                 totals.bytes = progress.bytes_seen;
-                scan_bar.set_message(format_scan_message(
+                ui.set_scan_message(format_scan_message(
                     totals.files,
                     totals.bytes,
                     &source_path,
-                    scan_message_width,
                 ));
 
                 candidates.push(candidate);
@@ -1967,10 +1868,7 @@ fn collect_candidates(
         return Err(anyhow::anyhow!("scan worker panicked"));
     }
 
-    scan_bar.set_message(format!(
-        "{} files, {} bytes",
-        totals.files, totals.bytes
-    ));
+    ui.set_scan_message(format!("{} files, {} bytes", totals.files, totals.bytes));
 
     Ok((candidates, totals))
 }
@@ -1995,47 +1893,12 @@ fn build_scan_scope_key(args: &SyncCommand, extensions: &[String]) -> String {
     )
 }
 
-fn progress_message_width(
-    term_width: usize,
-    prefix_len: usize,
-    bar_width: usize,
-    left_value_width: usize,
-    right_value_width: usize,
-) -> usize {
-    let fixed = prefix_len
-        .saturating_add(1) // space after prefix
-        .saturating_add(1) // [
-        .saturating_add(bar_width)
-        .saturating_add(1) // ]
-        .saturating_add(1) // space
-        .saturating_add(left_value_width)
-        .saturating_add(1) // /
-        .saturating_add(right_value_width)
-        .saturating_add(1); // space before msg
-    term_width.saturating_sub(fixed)
-}
-
-fn scan_message_width(term_width: usize, prefix_len: usize) -> usize {
-    let spinner_len = 1_usize;
-    let left_width = prefix_len.saturating_add(spinner_len).saturating_add(2);
-    term_width.saturating_sub(left_width).saturating_sub(1)
-}
-
 fn format_scan_message(
     files: u64,
     bytes: u64,
     source_path: &str,
-    width: usize,
 ) -> String {
-    let counts = format!("{} files {} bytes", files, bytes);
-    if width == 0 {
-        return counts;
-    }
-
-    let spacer = " ";
-    let available = width.saturating_sub(counts.len()).saturating_sub(spacer.len());
-    let file_display = right_align_truncate(source_path, available);
-    format!("{counts}{spacer}{file_display}")
+    format!("{} files {} bytes {}", files, bytes, source_path)
 }
 
 /// find git repository root for a given path
@@ -2145,10 +2008,10 @@ fn get_repo_name(repo_root: &Path) -> String {
         .to_string()
 }
 
-fn format_filesize_message(bytes: u64, width: usize) -> String {
+fn format_filesize_message(bytes: u64) -> String {
     use indicatif::HumanBytes;
     let size_str = format!("{}", HumanBytes(bytes));
-    right_align_truncate(&size_str, width)
+    size_str
 }
 
 /// Format bytes as fixed-width compact string (5 chars): " 1.2g", "  46k", " 512b"
@@ -2168,34 +2031,6 @@ fn format_bytes_short(bytes: usize) -> String {
     };
     // fixed 5-char width, right-aligned
     format!("{:>5}", s)
-}
-
-fn right_align_truncate(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let value_chars: Vec<char> = value.chars().collect();
-    let value_len = value_chars.len();
-
-    let truncated = if value_len > width {
-        if width <= 3 {
-            ".".repeat(width)
-        } else {
-            let suffix_len = width - 3;
-            let suffix = value_chars[value_len - suffix_len..].iter().collect::<String>();
-            format!("...{suffix}")
-        }
-    } else {
-        value.to_string()
-    };
-
-    let truncated_len = truncated.chars().count();
-    if truncated_len >= width {
-        truncated
-    } else {
-        format!("{}{}", " ".repeat(width - truncated_len), truncated)
-    }
 }
 
 async fn query_documents(args: QueryCommand) -> Result<()> {

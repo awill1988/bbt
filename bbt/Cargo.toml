@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 cuda = ["backbone/cuda"]
 coreml = ["backbone/coreml"]
-heap-profiling = ["dep:dhat", "dep:ctrlc"]
+heap-profiling = ["dep:dhat"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -22,7 +22,7 @@ rayon = { workspace = true }
 console = { workspace = true }
 mimalloc = "0.1.39"
 dhat = { workspace = true, optional = true }
-ctrlc = { workspace = true, optional = true }
+ctrlc = { workspace = true }
 once_cell = { workspace = true }
 qdrant-client = { workspace = true }
 serde_json = { workspace = true }

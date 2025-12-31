@@ -22,7 +22,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const HEADER_LINES: u16 = 5;
+const STATUS_LINES: u16 = 5;
+const BANNER_LINES: [&str; 5] = [
+    "\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}",
+    "\u{2502}\u{250f}\u{2513} \u{257b}\u{250f}\u{2501}\u{2578}   \u{250f}\u{2513} \u{250f}\u{2501}\u{2513}\u{250f}\u{2501}\u{2513}\u{257b}\u{250f}\u{2513}\u{257b}   \u{257a}\u{2533}\u{2578}\u{257b}\u{250f}\u{2533}\u{2513}\u{250f}\u{2501}\u{2578}\u{2502}",
+    "\u{2502}\u{2523}\u{253b}\u{2513}\u{2503}\u{2503}\u{257a}\u{2513}   \u{2523}\u{253b}\u{2513}\u{2523}\u{2533}\u{251b}\u{2523}\u{2501}\u{252b}\u{2503}\u{2503}\u{2517}\u{252b}    \u{2503} \u{2503}\u{2503}\u{2503}\u{2503}\u{2523}\u{2578} \u{2502}",
+    "\u{2502}\u{2517}\u{2501}\u{251b}\u{2579}\u{2517}\u{2501}\u{251b}   \u{2517}\u{2501}\u{251b}\u{2579}\u{2517}\u{2578}\u{2579} \u{2579}\u{2579}\u{2579} \u{2579}    \u{2579} \u{2579}\u{2579} \u{2579}\u{2517}\u{2501}\u{2578}\u{2502}",
+    "\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}",
+];
+const HEADER_LINES: u16 = STATUS_LINES + BANNER_LINES.len() as u16;
 const LOG_BUFFER_CAPACITY: usize = 2000;
 const TICK_RATE: Duration = Duration::from_millis(100);
 const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
@@ -431,6 +439,13 @@ fn truncate_tail(value: &str, width: usize) -> String {
     format!("...{}", suffix)
 }
 
+fn truncate_banner_line(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    value.chars().take(width).collect()
+}
+
 fn build_files_gauge(state: &UiState, area: Rect) -> Gauge<'static> {
     let ratio = if state.files.total == 0 {
         0.0
@@ -476,6 +491,15 @@ fn render_header(frame: &mut Frame, area: Rect, state: &UiState, spinner_index: 
     let spinner = SPINNER_FRAMES[spinner_index];
 
     let mut idx = 0;
+    for banner_line in BANNER_LINES.iter() {
+        if idx >= lines.len() {
+            return;
+        }
+        let line = Line::from(truncate_banner_line(banner_line, lines[idx].width as usize));
+        render_header_line(frame, lines[idx], line);
+        idx += 1;
+    }
+
     if idx < lines.len() {
         let line = build_scan_line(state, spinner, lines[idx]);
         render_header_line(frame, lines[idx], line);
@@ -576,6 +600,28 @@ fn ellipsize_middle(value: &str, width: usize) -> String {
     if width <= 3 {
         return ".".repeat(width);
     }
+
+    // for paths, preserve the filename (part after last separator)
+    if is_path_token(value) {
+        if let Some(sep_pos) = value.rfind(['/', '\\']) {
+            let filename = &value[sep_pos + 1..];
+            let filename_len = filename.chars().count();
+
+            // if filename fits with ellipsis, keep it intact
+            if filename_len + 4 <= width {
+                // ".../" + filename
+                let prefix_space = width - filename_len - 4; // space for prefix before ".../"
+                if prefix_space > 0 {
+                    let prefix: String = chars[..prefix_space].iter().collect();
+                    return format!("{}.../{}", prefix, filename);
+                } else {
+                    return format!(".../{}", filename);
+                }
+            }
+        }
+    }
+
+    // fallback: even split between prefix and suffix
     let available = width - 3;
     let prefix_len = (available + 1) / 2;
     let suffix_len = available - prefix_len;

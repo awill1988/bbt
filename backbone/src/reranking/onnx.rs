@@ -6,8 +6,11 @@ use ort::execution_providers::{
 };
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use ort::value::Tensor;
 use std::env;
 use std::path::Path;
+use std::sync::Arc;
+use tokenizers::Tokenizer;
 
 /// execution provider for onnx runtime
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +67,8 @@ fn is_force_cpu() -> bool {
 
 /// onnx-based cross-encoder reranker
 pub struct OnnxReranker {
-    #[allow(dead_code)]
     session: Session,
+    tokenizer: Arc<Tokenizer>,
     model_info: RerankModelInfo,
     provider: ExecutionProvider,
 }
@@ -82,10 +85,40 @@ impl OnnxReranker {
         model_info: RerankModelInfo,
         provider: ExecutionProvider,
     ) -> Result<Self> {
+        // load tokenizer (expects tokenizer.json in same directory as model)
+        let tokenizer_path = model_path.parent()
+            .ok_or_else(|| BbtError::Model("invalid model path".to_string()))?
+            .join("tokenizer.json");
+
+        let tokenizer = Arc::new(
+            Tokenizer::from_file(&tokenizer_path)
+                .map_err(|e| BbtError::Model(format!("failed to load tokenizer from {:?}: {}", tokenizer_path, e)))?
+        );
+
+        Self::new_with_tokenizer(model_path, model_info, provider, tokenizer)
+    }
+
+    /// create a new onnx reranker with a shared tokenizer
+    ///
+    /// # arguments
+    /// * `model_path` - path to onnx model file
+    /// * `model_info` - model metadata
+    /// * `provider` - execution provider (cpu/coreml/cuda)
+    /// * `tokenizer` - shared tokenizer instance
+    pub fn new_with_tokenizer(
+        model_path: &Path,
+        model_info: RerankModelInfo,
+        provider: ExecutionProvider,
+        tokenizer: Arc<Tokenizer>,
+    ) -> Result<Self> {
         let session_builder = Session::builder()
             .map_err(|e| BbtError::Model(format!("failed to create session builder: {}", e)))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?;
+            .map_err(|e| BbtError::Model(format!("failed to set optimization level: {}", e)))?
+            .with_intra_threads(1)
+            .map_err(|e| BbtError::Model(format!("failed to set intra threads: {}", e)))?
+            .with_inter_threads(1)
+            .map_err(|e| BbtError::Model(format!("failed to set inter threads: {}", e)))?;
 
         let session_builder = match provider {
             ExecutionProvider::Cuda => session_builder
@@ -124,6 +157,7 @@ impl OnnxReranker {
 
         Ok(Self {
             session,
+            tokenizer,
             model_info,
             provider,
         })
@@ -136,38 +170,136 @@ impl OnnxReranker {
     ///
     /// # returns
     /// relevance scores (one per pair)
-    pub fn score_batch(&self, pairs: &[(String, String)]) -> Result<Vec<f32>> {
+    pub fn score_batch(&mut self, pairs: &[(String, String)]) -> Result<Vec<f32>> {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
 
-        // todo: implement actual onnx inference
-        // for now, return placeholder scores based on text similarity
-        tracing::warn!(
-            "onnx reranker inference not yet implemented, returning placeholder scores"
+        tracing::debug!(
+            count = pairs.len(),
+            provider = ?self.provider,
+            "scoring query-document pairs"
         );
 
-        let scores: Vec<f32> = pairs
+        // for cross-encoders, we encode each (query, doc) pair together
+        // the tokenizer handles the [CLS] query [SEP] doc [SEP] format
+        let texts: Vec<(&str, &str)> = pairs
             .iter()
-            .map(|(query, doc)| {
-                // simple heuristic: score based on common words
-                let query_lower = query.to_lowercase();
-                let doc_lower = doc.to_lowercase();
-                let query_words: std::collections::HashSet<_> =
-                    query_lower.split_whitespace().collect();
-                let doc_words: std::collections::HashSet<_> =
-                    doc_lower.split_whitespace().collect();
-
-                let common = query_words.intersection(&doc_words).count() as f32;
-                let total = query_words.len().max(doc_words.len()) as f32;
-
-                if total > 0.0 {
-                    common / total
-                } else {
-                    0.0
-                }
-            })
+            .map(|(q, d)| (q.as_str(), d.as_str()))
             .collect();
+
+        let encodings = self.tokenizer
+            .encode_batch(texts, true)
+            .map_err(|e| BbtError::Model(format!("tokenization failed: {}", e)))?;
+
+        // prepare input tensors
+        let batch_size = encodings.len();
+        let model_max_len = self.model_info.max_seq_len;
+        let max_len = encodings
+            .iter()
+            .map(|e| e.len())
+            .max()
+            .unwrap_or(0)
+            .min(model_max_len);
+
+        // create input tensors with padding
+        let mut input_ids_vec = Vec::with_capacity(batch_size * max_len);
+        let mut attention_mask_vec = Vec::with_capacity(batch_size * max_len);
+
+        for encoding in &encodings {
+            let ids = encoding.get_ids();
+            let attention = encoding.get_attention_mask();
+            let seq_len = ids.len();
+            let truncated_len = seq_len.min(max_len);
+
+            input_ids_vec.extend_from_slice(&ids[..truncated_len]);
+            attention_mask_vec.extend_from_slice(&attention[..truncated_len]);
+
+            // pad to max_len
+            if truncated_len < max_len {
+                input_ids_vec.resize(input_ids_vec.len() + (max_len - truncated_len), 0);
+                attention_mask_vec.resize(attention_mask_vec.len() + (max_len - truncated_len), 0);
+            }
+        }
+
+        // convert to i64 for onnx
+        let input_ids: Vec<i64> = input_ids_vec.iter().map(|&x| x as i64).collect();
+        let attention_mask: Vec<i64> = attention_mask_vec.iter().map(|&x| x as i64).collect();
+
+        // create onnx tensors
+        let input_ids_tensor = Tensor::from_array((vec![batch_size, max_len], input_ids.into_boxed_slice()))
+            .map_err(|e| BbtError::Model(format!("failed to create input_ids tensor: {}", e)))?;
+
+        let attention_mask_tensor = Tensor::from_array((vec![batch_size, max_len], attention_mask.into_boxed_slice()))
+            .map_err(|e| BbtError::Model(format!("failed to create attention_mask tensor: {}", e)))?;
+
+        // check if model expects token_type_ids
+        let requires_token_type_ids = self.session
+            .inputs
+            .iter()
+            .any(|input| input.name == "token_type_ids");
+
+        // capture output names before mutable borrow for error messages
+        let output_names: Vec<_> = self.session.outputs.iter().map(|o| o.name.clone()).collect();
+
+        // run inference
+        let outputs = if requires_token_type_ids {
+            let token_type_ids: Vec<i64> = vec![0i64; batch_size * max_len];
+            let token_type_ids_tensor = Tensor::from_array((vec![batch_size, max_len], token_type_ids.into_boxed_slice()))
+                .map_err(|e| BbtError::Model(format!("failed to create token_type_ids tensor: {}", e)))?;
+
+            self.session
+                .run(ort::inputs![
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor,
+                    "token_type_ids" => token_type_ids_tensor
+                ])
+                .map_err(|e| BbtError::Model(format!("onnx inference failed: {}", e)))?
+        } else {
+            self.session
+                .run(ort::inputs![
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor
+                ])
+                .map_err(|e| BbtError::Model(format!("onnx inference failed: {}", e)))?
+        };
+
+        // extract scores from output
+        // cross-encoder models typically output logits with shape [batch_size, num_labels]
+        // for binary relevance, num_labels=1 or num_labels=2
+        // try common output names first, then fall back to index-based access
+        let output_tensor = outputs.get("logits")
+            .or_else(|| outputs.get("output"))
+            .or_else(|| outputs.get("scores"))
+            .or_else(|| outputs.get("output_0"))
+            .ok_or_else(|| {
+                BbtError::Model(format!("no output from reranker model, available: {:?}", output_names))
+            })?;
+
+        let (shape, output_data) = output_tensor.try_extract_tensor::<f32>()
+            .map_err(|e| BbtError::Model(format!("failed to extract output tensor: {}", e)))?;
+
+        // extract scores based on output shape
+        let scores: Vec<f32> = if shape.len() == 2 && shape[1] == 1 {
+            // [batch_size, 1] - single logit per pair
+            output_data.iter().copied().collect()
+        } else if shape.len() == 2 && shape[1] == 2 {
+            // [batch_size, 2] - binary classification, use logit for positive class
+            output_data.chunks(2).map(|chunk| chunk[1]).collect()
+        } else if shape.len() == 1 {
+            // [batch_size] - already flattened scores
+            output_data.iter().copied().collect()
+        } else {
+            return Err(BbtError::Model(format!(
+                "unexpected output shape: {:?}, expected [batch_size, 1] or [batch_size, 2]",
+                shape
+            )));
+        };
+
+        tracing::debug!(
+            "generated {} reranking scores",
+            scores.len()
+        );
 
         // apply sigmoid normalization if configured
         if self.model_info.normalize_scores {

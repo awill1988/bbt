@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::embedding::Embedder;
+use std::sync::{Arc, Mutex};
 
 /// Batch embedding processor - generic over any Embedder implementation
 pub struct BatchEmbedder<'a, E: Embedder> {
@@ -74,74 +75,89 @@ impl<'a, E: Embedder> BatchEmbedder<'a, E> {
     }
 }
 
-/// Async batch embedding processor - generic over any Embedder implementation
+/// Async batch embedding processor - wraps embedder in Arc<Mutex<E>> for thread-safe async access
 ///
-/// Note: Current implementation uses spawn_blocking with placeholder embeddings.
-/// For real async embedding, would need Arc<Mutex<E>> or Send + Sync embedder.
-pub struct AsyncBatchEmbedder<'a, E: Embedder> {
-    embedder: &'a E,
+/// Uses spawn_blocking to run embedding generation without blocking the async runtime.
+/// The embedder is wrapped in Arc<Mutex<E>> to safely share across thread boundaries.
+pub struct AsyncBatchEmbedder<E: Embedder + Send + 'static> {
+    embedder: Arc<Mutex<E>>,
     batch_size: usize,
+    dimensions: usize,
 }
 
-impl<'a, E: Embedder> AsyncBatchEmbedder<'a, E> {
+impl<E: Embedder + Send + 'static> AsyncBatchEmbedder<E> {
     /// Create a new async batch embedder
-    pub fn new(embedder: &'a E, batch_size: usize) -> Self {
+    ///
+    /// Takes ownership of the embedder and wraps it in Arc<Mutex<E>> for thread-safe access.
+    pub fn new(embedder: E, batch_size: usize) -> Self {
+        let dimensions = embedder.dimensions();
+        Self {
+            embedder: Arc::new(Mutex::new(embedder)),
+            batch_size,
+            dimensions,
+        }
+    }
+
+    /// Create from an already-wrapped embedder
+    pub fn from_shared(embedder: Arc<Mutex<E>>, batch_size: usize, dimensions: usize) -> Self {
         Self {
             embedder,
             batch_size,
+            dimensions,
         }
     }
 
     /// Get embedding dimensions from the underlying embedder
     pub fn dimensions(&self) -> usize {
-        self.embedder.dimensions()
+        self.dimensions
+    }
+
+    /// Get a clone of the shared embedder reference
+    pub fn shared_embedder(&self) -> Arc<Mutex<E>> {
+        Arc::clone(&self.embedder)
     }
 
     /// Process texts in batches asynchronously
     ///
     /// Runs embedding generation in a blocking task to avoid blocking async runtime.
-    /// Note: Currently generates placeholder embeddings - real implementation would
-    /// need Arc<Mutex<E>> to share embedder across thread boundary.
     pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
 
         let batch_size = self.batch_size;
-        let dimensions = self.embedder.dimensions();
         let total = texts.len();
+        let embedder = Arc::clone(&self.embedder);
 
         tracing::info!(
             total_texts = total,
             batch_size = batch_size,
-            dimensions = dimensions,
+            dimensions = self.dimensions,
             "processing embeddings asynchronously"
         );
 
-        // run embedding in blocking task
-        // todo: use Arc<Mutex<E>> to actually call embedder.embed() in blocking task
+        // run embedding in blocking task with shared embedder
         let result = tokio::task::spawn_blocking(move || {
             let mut all_embeddings = Vec::with_capacity(total);
 
             for chunk in texts.chunks(batch_size) {
-                // placeholder: generate deterministic embeddings based on text
-                let embeddings: Vec<Vec<f32>> = chunk
-                    .iter()
-                    .map(|text| {
-                        let hash = text.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64));
-                        (0..dimensions)
-                            .map(|i| ((hash.wrapping_mul(i as u64 + 1) % 1000) as f32) / 1000.0)
-                            .collect()
-                    })
-                    .collect();
+                let chunk_texts: Vec<String> = chunk.to_vec();
+
+                // acquire lock and generate embeddings for this batch
+                let embeddings = {
+                    let mut guard = embedder
+                        .lock()
+                        .map_err(|e| crate::error::BbtError::Model(format!("mutex poisoned: {}", e)))?;
+                    guard.embed(&chunk_texts)?
+                };
 
                 all_embeddings.extend(embeddings);
             }
 
-            all_embeddings
+            Ok::<Vec<Vec<f32>>, crate::error::BbtError>(all_embeddings)
         })
         .await
-        .map_err(|e| crate::error::BbtError::Model(format!("task join error: {}", e)))?;
+        .map_err(|e| crate::error::BbtError::Model(format!("task join error: {}", e)))??;
 
         Ok(result)
     }
@@ -238,7 +254,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_batch_embedder() -> Result<()> {
         let embedder = create_mock_embedder();
-        let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
+        let async_embedder = AsyncBatchEmbedder::new(embedder, 32);
 
         let texts: Vec<String> = (0..10).map(|i| format!("text {}", i)).collect();
         let embeddings = async_embedder.embed_batch(texts).await?;
@@ -252,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_batch_embedder_empty() -> Result<()> {
         let embedder = create_mock_embedder();
-        let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
+        let async_embedder = AsyncBatchEmbedder::new(embedder, 32);
 
         let embeddings = async_embedder.embed_batch(vec![]).await?;
         assert_eq!(embeddings.len(), 0);
@@ -263,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_batch_embedder_dimensions() -> Result<()> {
         let embedder = create_mock_embedder();
-        let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
+        let async_embedder = AsyncBatchEmbedder::new(embedder, 32);
 
         assert_eq!(async_embedder.dimensions(), TEST_DIMENSIONS);
 
@@ -274,13 +290,29 @@ mod tests {
     async fn test_async_batch_embedder_deterministic() -> Result<()> {
         // verify async embeddings are deterministic
         let embedder = create_mock_embedder();
-        let async_embedder = AsyncBatchEmbedder::new(&embedder, 32);
+        let async_embedder = AsyncBatchEmbedder::new(embedder, 32);
 
         let texts = vec!["hello".to_string(), "world".to_string()];
         let embeddings1 = async_embedder.embed_batch(texts.clone()).await?;
         let embeddings2 = async_embedder.embed_batch(texts).await?;
 
         assert_eq!(embeddings1, embeddings2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_batch_embedder_from_shared() -> Result<()> {
+        let embedder = create_mock_embedder();
+        let dimensions = embedder.dimensions();
+        let shared = Arc::new(Mutex::new(embedder));
+        let async_embedder = AsyncBatchEmbedder::from_shared(shared, 32, dimensions);
+
+        let texts: Vec<String> = (0..5).map(|i| format!("text {}", i)).collect();
+        let embeddings = async_embedder.embed_batch(texts).await?;
+
+        assert_eq!(embeddings.len(), 5);
+        assert_eq!(embeddings[0].len(), TEST_DIMENSIONS);
 
         Ok(())
     }

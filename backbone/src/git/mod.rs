@@ -17,4 +17,7 @@ pub use models::{
 pub use extractor::CommitExtractor;
 pub use chunking::{chunk_commit, CommitChunkingStrategy};
 pub use classification::classify_commit;
-pub use statistics::{DeveloperStats, FileEvolution, generate_developer_stats, generate_file_evolution};
+pub use statistics::{
+    CommitReference, DeveloperStats, FileEvolution,
+    generate_developer_stats, generate_file_evolution,
+};

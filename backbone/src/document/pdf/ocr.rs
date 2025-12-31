@@ -1,8 +1,10 @@
-use super::layout::PageContent;
-use crate::error::Result;
+use super::layout::{PageContent, TextLine};
+#[cfg(feature = "ocr")]
+use super::layout::BoundingBox;
+use crate::error::{BbtError, Result};
 
 #[cfg(feature = "ocr")]
-use tesseract::{Tesseract, InitializeError};
+use tesseract::Tesseract;
 
 /// Configuration for OCR processing
 #[derive(Debug, Clone)]
@@ -21,6 +23,9 @@ pub struct OcrConfig {
 
     /// Enable OCR for all pages regardless of text content
     pub force_ocr: bool,
+
+    /// DPI for rendering PDF pages to images (default 150)
+    pub render_dpi: u32,
 }
 
 impl Default for OcrConfig {
@@ -31,6 +36,7 @@ impl Default for OcrConfig {
             engine_mode: 3, // default
             page_seg_mode: 3, // auto
             force_ocr: false,
+            render_dpi: 150,
         }
     }
 }
@@ -38,8 +44,6 @@ impl Default for OcrConfig {
 /// OCR processor for extracting text from images
 pub struct OcrProcessor {
     config: OcrConfig,
-    #[cfg(feature = "ocr")]
-    tesseract: Option<Tesseract>,
 }
 
 impl OcrProcessor {
@@ -47,29 +51,29 @@ impl OcrProcessor {
     pub fn new(config: OcrConfig) -> Result<Self> {
         #[cfg(feature = "ocr")]
         {
-            let tesseract = Self::init_tesseract(&config).ok();
-            Ok(Self { config, tesseract })
+            // verify tesseract is available by attempting initialization
+            let _ = Self::create_tesseract(&config)?;
+            tracing::info!(
+                "ocr processor initialized with language={}, dpi={}",
+                config.language,
+                config.render_dpi
+            );
         }
 
-        #[cfg(not(feature = "ocr"))]
-        {
-            Ok(Self { config })
-        }
+        Ok(Self { config })
     }
 
     #[cfg(feature = "ocr")]
-    fn init_tesseract(config: &OcrConfig) -> std::result::Result<Tesseract, InitializeError> {
-        let mut tess = Tesseract::new(None, Some(&config.language))?;
-        // Note: set_variable and other configuration would be called here
-        // but the tesseract crate API may vary
-        Ok(tess)
+    fn create_tesseract(config: &OcrConfig) -> Result<Tesseract> {
+        Tesseract::new(None, Some(&config.language))
+            .map_err(|e| BbtError::Model(format!("failed to initialize tesseract: {:?}", e)))
     }
 
     /// Check if OCR is available
     pub fn is_available(&self) -> bool {
         #[cfg(feature = "ocr")]
         {
-            self.tesseract.is_some()
+            Self::create_tesseract(&self.config).is_ok()
         }
 
         #[cfg(not(feature = "ocr"))]
@@ -89,13 +93,26 @@ impl OcrProcessor {
         char_count < self.config.min_chars_threshold
     }
 
-    /// Process a page with OCR if needed
+    /// Process a page with OCR using rendered image data
     ///
-    /// Note: This is a placeholder implementation as the actual OCR requires
-    /// converting the PDF page to an image first, which would need pdfium-render
-    /// or another library to render the page.
+    /// # arguments
+    /// * `page` - the page content to augment with OCR text
+    /// * `image_data` - raw image bytes (RGB or grayscale)
+    /// * `width` - image width in pixels
+    /// * `height` - image height in pixels
+    /// * `bytes_per_pixel` - 1 for grayscale, 3 for RGB, 4 for RGBA
+    ///
+    /// # returns
+    /// true if OCR was performed and text was added
     #[allow(unused_variables)]
-    pub fn process_page(&self, page: &mut PageContent) -> Result<bool> {
+    pub fn process_page_with_image(
+        &self,
+        page: &mut PageContent,
+        image_data: &[u8],
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Result<bool> {
         if !self.is_available() {
             return Ok(false);
         }
@@ -106,16 +123,24 @@ impl OcrProcessor {
 
         #[cfg(feature = "ocr")]
         {
-            // Actual OCR implementation would:
-            // 1. Render PDF page to image (using pdfium-render)
-            // 2. Pass image to tesseract
-            // 3. Extract text with bounding boxes
-            // 4. Create TextLine objects with is_ocr=true
-            // 5. Add to page.lines
+            let ocr_lines = self.run_ocr(image_data, width, height, bytes_per_pixel, page.dimensions)?;
 
-            // For now, this is a placeholder that returns false
-            // indicating OCR was not performed
-            Ok(false)
+            if ocr_lines.is_empty() {
+                return Ok(false);
+            }
+
+            tracing::debug!(
+                "ocr extracted {} lines from page {}",
+                ocr_lines.len(),
+                page.page_number
+            );
+
+            // add ocr lines to page
+            for line in ocr_lines {
+                page.add_line(line);
+            }
+
+            Ok(true)
         }
 
         #[cfg(not(feature = "ocr"))]
@@ -124,23 +149,123 @@ impl OcrProcessor {
         }
     }
 
-    /// Process a raw image buffer with OCR
+    /// Process a page with OCR if needed (legacy interface)
     ///
-    /// This would be called with a rendered PDF page image
-    #[cfg(feature = "ocr")]
+    /// Note: This requires the caller to have already rendered the page.
+    /// For full OCR workflow, use process_page_with_image with rendered bitmap.
     #[allow(unused_variables)]
-    pub fn process_image(&self, image_data: &[u8], width: u32, height: u32) -> Result<Vec<TextLine>> {
-        if let Some(ref tess) = self.tesseract {
-            // Actual implementation would:
-            // 1. Set image in tesseract
-            // 2. Run recognition
-            // 3. Extract text with bounding boxes
-            // 4. Create TextLine objects
+    pub fn process_page(&self, page: &mut PageContent) -> Result<bool> {
+        if !self.is_available() {
+            return Ok(false);
+        }
 
-            // Placeholder for now
-            Ok(Vec::new())
-        } else {
-            Err(BbtError::Model("tesseract not initialized".to_string()))
+        if !self.needs_ocr(page) {
+            return Ok(false);
+        }
+
+        // cannot perform OCR without image data
+        // caller should use process_page_with_image with rendered bitmap
+        tracing::debug!(
+            "page {} needs ocr but no image data provided",
+            page.page_number
+        );
+        Ok(false)
+    }
+
+    /// Run OCR on image data and return extracted text lines
+    #[cfg(feature = "ocr")]
+    fn run_ocr(
+        &self,
+        image_data: &[u8],
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+        page_dimensions: (f32, f32),
+    ) -> Result<Vec<TextLine>> {
+        let mut tess = Self::create_tesseract(&self.config)?;
+
+        // set image data in tesseract
+        // tesseract expects raw pixel data in row-major order
+        tess = tess.set_frame(
+            image_data,
+            width as i32,
+            height as i32,
+            bytes_per_pixel as i32,
+            (width * bytes_per_pixel) as i32, // bytes per line
+        ).map_err(|e| BbtError::Model(format!("failed to set image frame: {:?}", e)))?;
+
+        // run recognition
+        let text = tess.get_text()
+            .map_err(|e| BbtError::Model(format!("tesseract recognition failed: {:?}", e)))?;
+
+        // parse recognized text into TextLine objects
+        // scale factor from image pixels to PDF points
+        let scale_x = page_dimensions.0 / width as f32;
+        let scale_y = page_dimensions.1 / height as f32;
+
+        let mut lines = Vec::new();
+        let line_height = 12.0; // estimated line height in points
+
+        for (line_idx, line_text) in text.lines().enumerate() {
+            let trimmed = line_text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // estimate bounding box based on line position
+            // note: for precise bounding boxes, would need tesseract's HOCR output
+            let y_pos = page_dimensions.1 - ((line_idx as f32 + 1.0) * line_height * 1.5);
+            let bbox = BoundingBox::new(
+                50.0,                      // left margin
+                y_pos.max(0.0),            // y position
+                page_dimensions.0 - 100.0, // width
+                line_height,               // height
+            );
+
+            lines.push(TextLine::new(
+                trimmed.to_string(),
+                line_height,
+                bbox,
+                true, // is_ocr = true
+            ));
+        }
+
+        Ok(lines)
+    }
+
+    /// Process raw image buffer with OCR (convenience method)
+    ///
+    /// # arguments
+    /// * `image_data` - raw image bytes
+    /// * `width` - image width in pixels
+    /// * `height` - image height in pixels
+    /// * `bytes_per_pixel` - 1 for grayscale, 3 for RGB, 4 for RGBA
+    ///
+    /// # returns
+    /// vector of extracted text lines
+    #[allow(unused_variables)]
+    pub fn process_image(
+        &self,
+        image_data: &[u8],
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Result<Vec<TextLine>> {
+        #[cfg(feature = "ocr")]
+        {
+            // use image dimensions as page dimensions (1:1 scale)
+            self.run_ocr(
+                image_data,
+                width,
+                height,
+                bytes_per_pixel,
+                (width as f32, height as f32),
+            )
+        }
+
+        #[cfg(not(feature = "ocr"))]
+        {
+            Err(BbtError::Model("ocr feature not enabled".to_string()))
         }
     }
 
@@ -167,6 +292,16 @@ impl OcrProcessor {
             pages_with_ocr,
             ocr_available: self.is_available(),
         }
+    }
+
+    /// Get the configured render DPI
+    pub fn render_dpi(&self) -> u32 {
+        self.config.render_dpi
+    }
+
+    /// Get the OCR configuration
+    pub fn config(&self) -> &OcrConfig {
+        &self.config
     }
 }
 

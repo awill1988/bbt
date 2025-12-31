@@ -89,12 +89,12 @@ pub struct SyncCommand {
     #[clap(long)]
     commits_since: Option<String>,
 
-    /// Files larger than this (in KiB) get exclusive GPU access
-    #[clap(long, default_value = "20")]
+    /// Files larger than this (in KiB) are processed on CPU to avoid VRAM spikes
+    #[clap(long, default_value = "512")]
     large_file_threshold_kib: usize,
 
-    /// Max bytes in-flight across all sessions (in KiB, max 150)
-    #[clap(long, default_value = "128")]
+    /// Max bytes in-flight across all sessions (in KiB)
+    #[clap(long, default_value = "512")]
     max_pool_bytes_kib: usize,
 }
 
@@ -866,7 +866,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     // - small files share the pool up to total budget
     // - large files (> threshold) are processed on CPU to avoid VRAM spikes
     let max_chunks_in_flight = session_pool_size * 64;
-    let total_bytes_budget = args.max_pool_bytes_kib.min(150) * 1024; // convert KiB to bytes, max 150 KiB
+    let total_bytes_budget = args.max_pool_bytes_kib * 1024; // convert KiB to bytes
     let large_file_threshold = args.large_file_threshold_kib * 1024; // convert KiB to bytes
     let chunk_budget = Arc::new(crate::chunk_budget::ChunkBudget::new(
         max_chunks_in_flight,
@@ -931,6 +931,12 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     worker_id, session_id, cpu_embedder.is_some());
 
                 loop {
+                    // check for shutdown before waiting for next task
+                    if crate::shutdown::is_shutdown_requested() {
+                        tracing::info!("worker {} shutting down", worker_id);
+                        break;
+                    }
+
                     let task = {
                         let receiver = task_rx.lock().expect("task_rx lock poisoned");
                         receiver.recv()
@@ -1103,6 +1109,11 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     let resource_update_handle = std::thread::spawn(move || {
         let mut monitor = crate::resource_monitor::ResourceMonitor::new();
         loop {
+            // check for shutdown
+            if crate::shutdown::is_shutdown_requested() {
+                break;
+            }
+
             // wait until sync has started before displaying stats
             if !display_stats_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1173,6 +1184,12 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     display_stats.store(true, std::sync::atomic::Ordering::Relaxed);
 
     for candidate in candidates {
+        // check for shutdown before processing next file
+        if crate::shutdown::is_shutdown_requested() {
+            tracing::info!("shutdown requested, stopping file processing");
+            break;
+        }
+
         drain_embedding_results(
             &result_rx,
             &mut pending_tasks,
@@ -1431,7 +1448,9 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     drop(task_tx);
 
-    while pending_tasks > 0 {
+    // drain remaining results, but respect shutdown requests
+    let shutdown_requested = crate::shutdown::is_shutdown_requested();
+    while pending_tasks > 0 && !crate::shutdown::is_shutdown_requested() {
         match result_rx.recv() {
             Ok(result) => {
                 pending_tasks = pending_tasks.saturating_sub(1);
@@ -1453,17 +1472,24 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         let _ = handle.join();
     }
 
-    ui.finish_files("done");
-    ui.finish_bytes("done");
+    let was_interrupted = shutdown_requested || crate::shutdown::is_shutdown_requested();
+    let finish_message = if was_interrupted { "interrupted" } else { "done" };
+    ui.finish_files(finish_message);
+    ui.finish_bytes(finish_message);
     resource_done.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // wait for resource monitor thread to finish
     let _ = resource_update_handle.join();
 
-    // save bm25 index
+    // save bm25 index (always save, even on interrupt, to preserve progress)
     tracing::info!("saving bm25 index with {} documents", bm25_index.num_docs());
     if let Err(e) = save_index(&bm25_index, &config.bm25_index_path) {
         tracing::error!("failed to save bm25 index: {}", e);
+    }
+
+    if was_interrupted {
+        tracing::info!("sync interrupted - progress saved, will resume on next run");
+        return Ok(());
     }
 
     // index git commits if requested
@@ -1562,6 +1588,12 @@ async fn sync_commits(
 
     // process each repository
     for repo_path in repo_paths {
+        // check for shutdown
+        if crate::shutdown::is_shutdown_requested() {
+            tracing::info!("shutdown requested, stopping commit indexing");
+            break;
+        }
+
         let repo_name = get_repo_name(&repo_path);
         tracing::info!("processing repository: {}", repo_name);
 
@@ -1587,6 +1619,12 @@ async fn sync_commits(
 
         // process each commit
         for commit in commits {
+            // check for shutdown
+            if crate::shutdown::is_shutdown_requested() {
+                tracing::info!("shutdown requested, stopping commit processing");
+                break;
+            }
+
             // chunk commit (message only for now)
             let chunks = match chunk_commit(&commit, CommitChunkingStrategy::MessageOnly, config.chunk_size, config.chunk_overlap) {
                 Ok(c) => c,
@@ -2687,7 +2725,7 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
             true,
         );
         let rerank_model_path = ensure_rerank_model(&rerank_model_info, &config.model_cache_dir)?;
-        let reranker = OnnxReranker::new(
+        let mut reranker = OnnxReranker::new(
             &rerank_model_path,
             rerank_model_info,
             RerankExecutionProvider::detect(),

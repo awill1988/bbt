@@ -12,6 +12,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 mod chunk_budget;
 mod cmd;
 mod resource_monitor;
+mod shutdown;
 mod terminal_layout;
 #[cfg(feature = "heap-profiling")]
 mod profiler;
@@ -19,11 +20,13 @@ mod profiler;
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
+    // set up signal handler for graceful shutdown on Ctrl+C
+    shutdown::setup_signal_handler();
+
     #[cfg(feature = "heap-profiling")]
     {
-        // initialize profiler and set up signal handler
+        // initialize profiler (signal handler in shutdown.rs handles snapshot on Ctrl+C)
         let _ = &*profiler::PROFILER;
-        profiler::setup_signal_handler();
     }
 
     let args = cmd::Cli::parse();

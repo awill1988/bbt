@@ -1,4 +1,5 @@
 pub mod error;
+pub mod lang;
 pub mod schema;
 pub mod llm;
 pub mod agent;

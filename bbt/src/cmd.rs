@@ -804,7 +804,8 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
     ui.set_files_position(resumed_files);
     ui.set_bytes_position(resumed_bytes);
 
-    let model_info = EmbeddingModelInfo::default_model();
+    let model_info = EmbeddingModelInfo::default_model()
+        .with_max_seq_len_cap(config.embedding_max_seq_len);
     let vector_dimensions = model_info.dimensions;
 
     let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
@@ -831,13 +832,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     // create pool of embedders for concurrent GPU access
     // more sessions = better GPU utilization but more VRAM (~1.5 GiB per session)
-    // scale sessions with workers: 1 session per 4 workers, min 2, max based on workers
+    // capped at 4 sessions to reduce VRAM pressure and provide each session more headroom
     //
     // to adjust session pool tolerance:
     //   - high VRAM (24+ GiB): use `embedding_workers / 2` for more parallelism
-    //   - low VRAM (8 GiB):    use `(embedding_workers / 8).clamp(1, 4)` for fewer sessions
+    //   - low VRAM (8 GiB):    use `(embedding_workers / 8).clamp(1, 2)` for fewer sessions
     //   - balanced (12-16 GiB): current formula works well
-    let session_pool_size = (embedding_workers / 4).clamp(2, embedding_workers);
+    let session_pool_size = (embedding_workers / 4).clamp(1, 4);
     tracing::info!(
         "initializing {} onnx sessions for concurrent GPU access",
         session_pool_size
@@ -863,7 +864,7 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
 
     // chunk budget: controls concurrent GPU memory pressure
     // - small files share the pool up to total budget
-    // - large files (> threshold) wait for drain, then run exclusively
+    // - large files (> threshold) are processed on CPU to avoid VRAM spikes
     let max_chunks_in_flight = session_pool_size * 64;
     let total_bytes_budget = args.max_pool_bytes_kib.min(150) * 1024; // convert KiB to bytes, max 150 KiB
     let large_file_threshold = args.large_file_threshold_kib * 1024; // convert KiB to bytes
@@ -873,10 +874,35 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         large_file_threshold,
     ));
     tracing::info!(
-        "chunk budget: {} pool, files >{} run exclusively",
+        "chunk budget: {} pool, files >{} processed on CPU",
         format_bytes_short(total_bytes_budget),
         format_bytes_short(large_file_threshold),
     );
+
+    // create CPU embedder for large files to avoid VRAM pressure
+    // large files are processed on CPU while small files use GPU pool
+    let cpu_embedder: Option<Arc<Mutex<OnnxEmbedder>>> = if embedding_provider != ExecutionProvider::Cpu {
+        tracing::info!("initializing CPU embedder for large file processing");
+        match OnnxEmbedder::new_with_shared_tokenizer(
+            &model_path,
+            model_info.clone(),
+            ExecutionProvider::Cpu,
+            Arc::clone(&shared_tokenizer),
+            1, // single CPU session
+        ) {
+            Ok(embedder) => {
+                tracing::info!("CPU embedder ready for large files (>{} threshold)", format_bytes_short(large_file_threshold));
+                Some(Arc::new(Mutex::new(embedder)))
+            }
+            Err(e) => {
+                tracing::warn!("failed to create CPU embedder: {}, large files will use GPU", e);
+                None
+            }
+        }
+    } else {
+        // already using CPU, no fallback needed
+        None
+    };
 
     // track active sessions for monitoring
     let active_sessions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -892,7 +918,8 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         let result_tx = result_tx.clone();
         // assign worker to session round-robin
         let session_id = worker_id % session_pool_size;
-        let embedder = Arc::clone(&embedder_pool[session_id]);
+        let gpu_embedder = Arc::clone(&embedder_pool[session_id]);
+        let cpu_embedder = cpu_embedder.clone();
         let worker_batch_size = embedding_batch_size;
         let chunk_budget = Arc::clone(&chunk_budget);
         let active_sessions = Arc::clone(&active_sessions);
@@ -900,7 +927,8 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
         let handle = thread::Builder::new()
             .name(format!("embedding_worker_{}", worker_id))
             .spawn(move || {
-                tracing::info!("worker {} started (session {})", worker_id, session_id);
+                tracing::info!("worker {} started (session {}, cpu fallback: {})",
+                    worker_id, session_id, cpu_embedder.is_some());
 
                 loop {
                     let task = {
@@ -917,26 +945,46 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                     let is_large_file = task.total_chunk_bytes > chunk_budget.large_file_threshold();
 
                     // acquire chunk budget before processing (blocks if over capacity)
-                    // large files wait for queue to drain, then run exclusively
+                    // large files are processed on CPU to avoid VRAM pressure
                     let size_kib = task.total_chunk_bytes / 1024;
+                    let use_cpu = is_large_file && cpu_embedder.is_some();
+
                     if is_large_file {
-                        tracing::warn!(
-                            "large file ({} KiB, {} chunks) - waiting for queue to drain",
-                            size_kib, num_chunks
-                        );
+                        if use_cpu {
+                            tracing::info!(
+                                "large file ({} KiB, {} chunks) - processing on CPU",
+                                size_kib, num_chunks
+                            );
+                        } else {
+                            tracing::warn!(
+                                "large file ({} KiB, {} chunks) - waiting for queue to drain (no CPU fallback)",
+                                size_kib, num_chunks
+                            );
+                        }
                     }
-                    let _budget_guard = chunk_budget.acquire(num_chunks, task.total_chunk_bytes);
-                    if is_large_file {
+
+                    // for CPU processing, skip budget acquisition since it doesn't use GPU
+                    let _budget_guard = if !use_cpu {
+                        Some(chunk_budget.acquire(num_chunks, task.total_chunk_bytes))
+                    } else {
+                        None
+                    };
+
+                    if is_large_file && !use_cpu {
                         tracing::warn!(
-                            "large file ({} KiB, {} chunks) - now running exclusively",
+                            "large file ({} KiB, {} chunks) - now running exclusively on GPU",
                             size_kib, num_chunks
                         );
                     }
 
-                    // adaptive batch size: larger files get larger batches to use more GPU
-                    // this gives large files proportionally more GPU resources
-                    let adaptive_batch_size = if !task.chunks.is_empty() && task.total_chunk_bytes > 0 {
-                        // scale batch size with file size:
+                    // adaptive batch size: larger files get larger batches
+                    // for CPU: use smaller batches to reduce memory pressure
+                    // for GPU: scale with file size
+                    let adaptive_batch_size = if use_cpu {
+                        // CPU: use smaller batches for better memory efficiency
+                        worker_batch_size.min(16)
+                    } else if !task.chunks.is_empty() && task.total_chunk_bytes > 0 {
+                        // GPU: scale batch size with file size:
                         // - small files (<64 KiB): min batch (32)
                         // - medium files (64 KiB - 1 MiB): scale 32-128
                         // - large files (>1 MiB): max batch (256)
@@ -963,9 +1011,13 @@ async fn sync_documents(args: SyncCommand) -> Result<()> {
                         worker_batch_size
                     };
 
-                    // lock shared embedder for inference
-                    let embeddings = {
-                        let mut embedder = embedder.lock().expect("embedder lock poisoned");
+                    // use CPU embedder for large files, GPU for small files
+                    let embeddings = if use_cpu {
+                        let cpu_emb = cpu_embedder.as_ref().unwrap();
+                        let mut embedder = cpu_emb.lock().expect("cpu_embedder lock poisoned");
+                        embed_chunks(&mut *embedder, &task.chunks, adaptive_batch_size)
+                    } else {
+                        let mut embedder = gpu_embedder.lock().expect("embedder lock poisoned");
                         active_sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let result = embed_chunks(&mut *embedder, &task.chunks, adaptive_batch_size);
                         active_sessions.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -2085,7 +2137,8 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
         RetrievalMode::Vector => {
             tracing::info!("vector search with top_k={}", initial_limit);
 
-            let model_info = EmbeddingModelInfo::default_model();
+            let model_info = EmbeddingModelInfo::default_model()
+                .with_max_seq_len_cap(config.embedding_max_seq_len);
             let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
             let mut embedder = OnnxEmbedder::new(&model_path, model_info, EmbeddingExecutionProvider::detect())?;
 
@@ -2320,7 +2373,8 @@ async fn query_documents(args: QueryCommand) -> Result<()> {
             tracing::info!("hybrid search (vector + bm25) with top_k={}", initial_limit);
 
             // perform vector search
-            let model_info = EmbeddingModelInfo::default_model();
+            let model_info = EmbeddingModelInfo::default_model()
+                .with_max_seq_len_cap(config.embedding_max_seq_len);
             let model_path = ensure_onnx_model(&model_info, &config.model_cache_dir)?;
             let mut embedder = OnnxEmbedder::new(&model_path, model_info, EmbeddingExecutionProvider::detect())?;
 

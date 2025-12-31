@@ -1,6 +1,7 @@
 use crate::error::{BbtError, Result};
 use crate::git::models::{CommitDocument, CommitMetadata, DiffStats, GitSignature};
 use crate::git::classification::classify_commit;
+use crate::lang;
 use chrono::{DateTime, TimeZone, Utc};
 use git2::{Commit, DiffOptions, Repository};
 use std::collections::{HashMap, HashSet};
@@ -201,11 +202,9 @@ impl CommitExtractor {
                     let path_str = path.to_string_lossy().to_string();
                     file_paths.push(path_str.clone());
 
-                    // detect language from extension
-                    if let Some(ext) = path.extension() {
-                        if let Some(ext_str) = ext.to_str() {
-                            languages.insert(ext_str.to_lowercase());
-                        }
+                    // detect language using centralized lang module
+                    if let Some(language) = lang::from_path(path) {
+                        languages.insert(language.id.to_string());
                     }
                 }
                 true

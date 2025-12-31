@@ -5,17 +5,23 @@ Rust RAG system with hybrid search (vector + BM25), GPU acceleration, and real-t
 ## Quick Start
 
 ```bash
-# docker
-docker compose up -d bbt-cpu qdrant
+# docker deps
+docker compose up -d qdrant otel-collector
+
+# docker cli (cpu, scans ./documents)
+docker compose --profile cpu run --rm bbt-cpu sync /app/documents
+docker compose --profile cpu run --rm bbt-cpu query "search text"
 
 # native (macos)
 brew install pdfium
 cargo build --release --features coreml
-./target/release/bbt sync ~/projects
-./target/release/bbt query --query "search text"
 
 # native (linux + nvidia)
 cargo build --release --features cuda
+
+# run
+./target/release/bbt sync ~/projects
+./target/release/bbt query "search text"
 ```
 
 ## Commands
@@ -27,11 +33,8 @@ bbt sync ./src --ext rs,toml,md
 bbt sync ./docs --force --reset-state
 
 # query
-bbt query --query "search text"
-bbt query --query "search text" --mode vector --top-k 10
-
-# serve api
-bbt serve --host 0.0.0.0 --port 8080
+bbt query "search text"
+bbt query "search text" --mode vector --top-k 10
 ```
 
 **Resource monitoring** (during sync):
@@ -41,18 +44,22 @@ bbt serve --host 0.0.0.0 --port 8080
 
 ## Configuration
 
-Key environment variables (create `.env`):
+Defaults live in `backbone/src/config/defaults.rs`. Override only what you need:
 
 ```bash
-QDRANT_URL=http://localhost:6334
-STATE_STORE_PATH=./data/state.db
-CHUNK_SIZE=512
-EMBEDDING_MODEL_REPO=BAAI/bge-small-en-v1.5
-EMBEDDING_BATCH_SIZE=32
-FORCE_CPU=0                    # 1 to disable gpu
 LOG_LEVEL=info
+QDRANT_URL=http://localhost:6334
+EMBEDDING_MODEL_REPO=jinaai/jina-embeddings-v2-base-code
+EMBEDDING_MODEL_FILE=onnx/model.onnx
+EMBEDDING_BATCH_SIZE=32
+FORCE_CPU=1
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 ```
+
+Qdrant defaults to the gRPC port (6334).
+Set `FORCE_CPU=1` to disable gpu acceleration.
+Data defaults to `./data` (state db: `./data/state.db`) and models to `./.cache/models`. Override with `DATA_DIR`, `STATE_STORE_PATH`, or `MODEL_CACHE_DIR` if needed.
+Tracing is enabled when an OTLP endpoint is set. Disable with `ENABLE_TRACING=false`.
 
 ## GPU Memory Management
 
@@ -60,14 +67,16 @@ Large files get exclusive GPU access to prevent OOM:
 
 ```bash
 bbt sync ~/projects \
-  --large-file-threshold-kib 20 \  # files > 20 KiB get exclusive access
-  --max-pool-bytes-kib 128         # max concurrent bytes in flight
+  --large-file-threshold-kib 20 \
+  --max-pool-bytes-kib 128
 ```
+
+Files over 20 KiB get exclusive GPU access; max in-flight bytes is 128 KiB.
 
 ## Architecture
 
 ```
-bbt/       - cli (sync, query, serve)
+bbt/       - cli (sync, query, gen)
 backbone/  - core library (embedding, chunking, storage, tracing)
 ```
 
@@ -92,6 +101,7 @@ View profiles:
 
 ```bash
 docker compose up -d qdrant        # vector db: http://localhost:6333/dashboard
+docker compose up -d otel-collector # otlp grpc: http://localhost:4317
 docker compose up -d jaeger        # tracing:   http://localhost:16686
 docker compose up -d langfuse-web  # observability: http://localhost:3000
 ```

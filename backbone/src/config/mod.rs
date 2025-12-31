@@ -35,6 +35,8 @@ pub struct BbtConfig {
     pub embedding_workers: usize,
     pub embedding_queue_size: usize,
     pub embedding_dims: usize,
+    /// Cap on maximum sequence length (tokens) to reduce VRAM usage quadratically
+    pub embedding_max_seq_len: usize,
 
     // Retrieval
     pub retrieval_mode: RetrievalMode,

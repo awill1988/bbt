@@ -1,6 +1,5 @@
 use crate::error::Result;
 use crate::embedding::Embedder;
-use crate::embedding::onnx::OnnxEmbedder;
 
 /// Batch embedding processor - generic over any Embedder implementation
 pub struct BatchEmbedder<'a, E: Embedder> {

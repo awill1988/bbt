@@ -59,6 +59,10 @@ pub fn from_env() -> Result<BbtConfig> {
             &["EMBEDDING_DIMS"],
             defaults.embedding_dims,
         )?,
+        embedding_max_seq_len: get_env_parse_or(
+            &["EMBEDDING_MAX_SEQ_LEN"],
+            defaults.embedding_max_seq_len,
+        )?,
 
         // Retrieval
         retrieval_mode: get_env_parse_or(

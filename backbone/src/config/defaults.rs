@@ -41,10 +41,11 @@ pub fn default_config() -> BbtConfig {
         // Embedding (jina-embeddings-v2-base-code: 768 dims, 8192 token context)
         embedding_model_repo: "jinaai/jina-embeddings-v2-base-code".to_string(),
         embedding_model_file: "onnx/model.onnx".to_string(),
-        embedding_batch_size: 128, // large batches for gpu throughput
+        embedding_batch_size: 32, // smaller batches reduce attention matrix VRAM usage
         embedding_workers,
         embedding_queue_size,
         embedding_dims: 768,
+        embedding_max_seq_len: 2048, // cap sequence length for quadratic VRAM reduction
 
         // Retrieval
         retrieval_mode: RetrievalMode::Hybrid,

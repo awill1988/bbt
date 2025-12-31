@@ -7,27 +7,11 @@ services:
       args:
         ENABLE_GPU: true
         RUST_VERSION: "nightly"
-        CUDA_VERSION: "12.4.0"
+        CUDA_VERSION: "12.8.0"
     user: "${UID:-1000}:${GID:-1000}"
     environment:
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - ENABLE_TRACING=${ENABLE_TRACING:-true}
-      - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://otel-collector:4317}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
-      - HF_HOME=/app/.cache
-      - DATA_DIR=/app/data
-      - QDRANT_URL=http://qdrant:6333
-      - STATE_STORE_PATH=/app/data/state.db
-      - VECTOR_STORE_TYPE=qdrant
-      - RETRIEVAL_MODE=hybrid
-      - TOP_K=20
-      - VECTOR_WEIGHT=0.5
-      - BM25_WEIGHT=0.5
-      - MIN_SCORE=0.5
-      - CHUNK_SIZE=512
-      - CHUNK_OVERLAP=128
-      - SYNC_FORCE=false
-      - SYNC_RESET_STATE=false
+      - QDRANT_URL=http://qdrant:6334
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     volumes:
       - model_cache:/app/.cache
       - ./documents:/app/documents
@@ -35,9 +19,6 @@ services:
     depends_on:
       - qdrant
       - otel-collector
-    command: serve --host 0.0.0.0 --port 8080
-    ports:
-      - "8080:8080"
     deploy:
       resources:
         reservations:
@@ -58,25 +39,8 @@ services:
         RUST_VERSION: "nightly"
     user: "${UID:-1000}:${GID:-1000}"
     environment:
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - ENABLE_TRACING=${ENABLE_TRACING:-true}
-      - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://otel-collector:4317}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
-      - HF_HOME=/app/.cache
-      - DATA_DIR=/app/data
-      - QDRANT_URL=http://qdrant:6333
-      - STATE_STORE_PATH=/app/data/state.db
-      - VECTOR_STORE_TYPE=qdrant
-      - RETRIEVAL_MODE=hybrid
-      - TOP_K=20
-      - VECTOR_WEIGHT=0.5
-      - BM25_WEIGHT=0.5
-      - MIN_SCORE=0.5
-      - CHUNK_SIZE=512
-      - CHUNK_OVERLAP=128
-      - SYNC_FORCE=false
-      - SYNC_RESET_STATE=false
-      - FORCE_CPU=1
+      - QDRANT_URL=http://qdrant:6334
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     volumes:
       - model_cache:/app/.cache
       - ./data:/app/data
@@ -84,9 +48,6 @@ services:
     depends_on:
       - qdrant
       - otel-collector
-    command: serve --host 0.0.0.0 --port 8080
-    ports:
-      - "8080:8080"
     profiles:
       - cpu
 

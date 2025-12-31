@@ -72,6 +72,20 @@ impl EmbeddingModelInfo {
             description: format!("Custom model: {}", repo_id),
         }
     }
+
+    /// Apply a cap to max_seq_len for VRAM optimization
+    /// Returns a new model info with max_seq_len capped to the specified value
+    pub fn with_max_seq_len_cap(mut self, cap: usize) -> Self {
+        if cap > 0 && cap < self.max_seq_len {
+            tracing::info!(
+                "capping max_seq_len from {} to {} for VRAM optimization",
+                self.max_seq_len,
+                cap
+            );
+            self.max_seq_len = cap;
+        }
+        self
+    }
 }
 
 impl Default for EmbeddingModelInfo {
@@ -110,5 +124,33 @@ mod tests {
         assert_eq!(model.repo_id, "test/model");
         assert_eq!(model.dimensions, 768);
         assert_eq!(model.max_seq_len, 1024);
+    }
+
+    #[test]
+    fn test_max_seq_len_cap() {
+        // cap should reduce max_seq_len when cap is smaller
+        let model = EmbeddingModelInfo::default_model();
+        assert_eq!(model.max_seq_len, 8192);
+
+        let capped = model.with_max_seq_len_cap(2048);
+        assert_eq!(capped.max_seq_len, 2048);
+    }
+
+    #[test]
+    fn test_max_seq_len_cap_larger_than_model() {
+        // cap larger than model max_seq_len should not increase it
+        let model = EmbeddingModelInfo::minilm_l6();
+        assert_eq!(model.max_seq_len, 256);
+
+        let capped = model.with_max_seq_len_cap(4096);
+        assert_eq!(capped.max_seq_len, 256); // unchanged
+    }
+
+    #[test]
+    fn test_max_seq_len_cap_zero() {
+        // cap of 0 should not change anything
+        let model = EmbeddingModelInfo::default_model();
+        let capped = model.with_max_seq_len_cap(0);
+        assert_eq!(capped.max_seq_len, 8192); // unchanged
     }
 }

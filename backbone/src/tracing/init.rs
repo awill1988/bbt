@@ -90,15 +90,17 @@ fn read_bool_env(keys: &[&str], default: bool) -> bool {
 }
 
 pub fn init_tracing(service_name: &str, log_sender: Option<Sender<String>>) -> Result<OtelGuard> {
-    let enabled = read_bool_env(&["ENABLE_TRACING"], false);
+    let enabled = read_bool_env(&["ENABLE_TRACING"], true);
 
     let endpoint = env::var("PHOENIX_COLLECTOR_ENDPOINT")
         .or_else(|_| env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
         .or_else(|_| env::var("OTEL_ENDPOINT"))
         .ok();
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let env_filter = match env::var("LOG_LEVEL") {
+        Ok(level) => level.parse().unwrap_or_else(|_| "info".into()),
+        Err(_) => EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+    };
     if !enabled || endpoint.is_none() {
         // tracing not enabled, just set up basic logging
         if let Some(sender) = log_sender {

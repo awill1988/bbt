@@ -14,7 +14,7 @@ NC='\033[0m'
 IMAGE_NAME="${IMAGE_NAME:-bbt}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 ENABLE_GPU="${ENABLE_GPU:-false}"
-RUST_VERSION="${RUST_VERSION:-1.83}"
+RUST_VERSION="${RUST_VERSION:-nightly}"
 CUDA_VERSION="${CUDA_VERSION:-12.4.0}"
 PUSH="${PUSH:-false}"
 PLATFORM="${PLATFORM:-linux/amd64}"
@@ -33,7 +33,7 @@ ${YELLOW}options:${NC}
   -c, --cpu               cpu-only build (default)
   -p, --push              push to registry after build
   --platform PLATFORM     target platform (default: linux/amd64)
-  --rust-version VERSION  rust version (default: 1.75)
+  --rust-version VERSION  rust version (default: nightly)
   --cuda-version VERSION  cuda version (default: 12.4.0)
 
 ${YELLOW}examples:${NC}
@@ -180,24 +180,27 @@ if [ $? -eq 0 ]; then
     echo "  # basic run"
     echo "  docker run --rm ${IMAGE_NAME}:${IMAGE_TAG} --help"
     echo
-    echo "  # run server"
-    echo "  docker run --rm -p 8080:8080 ${IMAGE_NAME}:${IMAGE_TAG}"
-    echo
-    echo "  # run with volume mounts"
-    echo "  docker run --rm -p 8080:8080 \\"
+    echo "  # sync documents (set qdrant url as needed)"
+    echo "  docker run --rm \\"
     echo "    -v \$(pwd)/data:/app/data \\"
     echo "    -v \$(pwd)/documents:/app/documents \\"
-    echo "    ${IMAGE_NAME}:${IMAGE_TAG}"
+    echo "    -e QDRANT_URL=http://host.docker.internal:6334 \\"
+    echo "    ${IMAGE_NAME}:${IMAGE_TAG} sync /app/documents"
+    echo
+    echo "  # query"
+    echo "  docker run --rm \\"
+    echo "    -e QDRANT_URL=http://host.docker.internal:6334 \\"
+    echo "    ${IMAGE_NAME}:${IMAGE_TAG} query \"search text\""
     echo
 
     if [ "$ENABLE_GPU" = true ]; then
         echo "  # run with gpu (nvidia)"
-        echo "  docker run --rm --gpus all -p 8080:8080 ${IMAGE_NAME}:${IMAGE_TAG}"
+        echo "  docker run --rm --gpus all ${IMAGE_NAME}:${IMAGE_TAG} --help"
         echo
     fi
 
     echo -e "${YELLOW}or use docker compose:${NC}"
-    echo "  docker compose up -d"
+    echo "  docker compose up -d qdrant otel-collector"
     echo
 else
     echo

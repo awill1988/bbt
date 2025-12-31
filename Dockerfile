@@ -186,7 +186,7 @@ WORKDIR /app
 COPY --from=builder /build/target/release/bbt /usr/local/bin/bbt
 
 # create necessary directories with proper permissions
-RUN mkdir -p /app/.cache /app/data /app/documents /app/models && \
+RUN mkdir -p /app/.cache/models /app/data /app/documents && \
     # create non-root user
     groupadd -g 1000 bbt && \
     useradd -u 1000 -g bbt -s /bin/bash -m bbt && \
@@ -194,27 +194,15 @@ RUN mkdir -p /app/.cache /app/data /app/documents /app/models && \
     chown -R bbt:bbt /app
 
 # set environment variables
-ENV LOG_LEVEL=info \
-    DATA_DIR=/app/data \
-    MODEL_CACHE_DIR=/app/models \
-    HF_HOME=/app/.cache \
+ENV HF_HOME=/app/.cache \
     # pdfium library path
-    LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH} \
-    # disable gpu by default (can be overridden)
-    FORCE_CPU=${ENABLE_GPU:+0}${ENABLE_GPU:-1}
-
-# expose api port
-EXPOSE 8080
-
-# health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
 
 # switch to non-root user
 USER bbt:bbt
 
 ENTRYPOINT ["bbt"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["--help"]
 
 # =============================================================================
 # Metadata
